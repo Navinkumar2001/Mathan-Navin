@@ -1,0 +1,1 @@
+"""Chart visualization module."""

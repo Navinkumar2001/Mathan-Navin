@@ -1,0 +1,10 @@
+# Core dependencies (works on Linux for backtesting)
+pandas>=2.1.0
+numpy>=1.26.0
+plotly>=5.18.0
+pytz>=2023.3
+python-dateutil>=2.8.2
+loguru>=0.7.2
+
+# MT5 (Windows only - needed for live trading)
+# MetaTrader5>=5.0.45
