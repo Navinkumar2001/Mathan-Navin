@@ -252,12 +252,10 @@ class LiveTradingBot:
             time.sleep(poll_interval)
 
     def _update_session_from_tick(self, current_price: float) -> None:
-        """Update session high/low from live tick price during observation."""
-        sm = self.session_manager
-        if current_price > sm.session_high:
-            sm.session_high = current_price
-        if current_price < sm.session_low:
-            sm.session_low = current_price
+        """No longer update session high/low from tick - only candle data is used."""
+        # Session high/low is only updated from candle OHLC data (update_session_data)
+        # and the backfill. Tick updates caused inaccurate values at session boundaries.
+        pass
 
     def _run_observation(self, df, current_price: float) -> None:
         """
@@ -453,11 +451,13 @@ class LiveTradingBot:
         # Use the latest candle's date as reference for "today"
         today_server = df["server_time"].iloc[-1].strftime("%Y-%m-%d")
 
-        # Filter: today's date AND time between obs_start (07:00) and obs_end (15:30) inclusive
+        # Filter: candles starting at 07:00 up to (but not including) 15:30
+        # The 15:25 M5 candle is the last one fully within observation (covers 15:25-15:29:59)
+        # The 15:30 candle starts at 15:30 which is trading session territory
         mask = (
             (df["server_time"].dt.strftime("%Y-%m-%d") == today_server)
             & (df["server_time"].dt.time >= sm.obs_start)
-            & (df["server_time"].dt.time <= sm.obs_end)
+            & (df["server_time"].dt.time < sm.obs_end)
         )
         obs_candles = df[mask]
 
