@@ -35,6 +35,100 @@ class TradeEngine:
         self.partial_tp1_hit: bool = False
         self.partial_tp2_hit: bool = False
 
+    def evaluate_range_reentry(
+        self,
+        signal: str,
+        current_price: float,
+        session_high: float,
+        session_low: float,
+        is_trading_session: bool,
+    ) -> TradeSetup | None:
+        """
+        Evaluate a range breakout re-entry signal.
+
+        This is the primary entry methodology:
+        - During IST 09:00-18:30 we observe and mark session High/Low.
+        - During IST 18:30-23:30, if price crosses a boundary and comes back inside:
+          * Crossed HIGH → came back inside → SELL (reversal from premium)
+          * Crossed LOW → came back inside → BUY (reversal from discount)
+
+        Args:
+            signal: "BUY" or "SELL" from SessionManager.check_range_breakout_reentry()
+            current_price: Current market price
+            session_high: Observation session high (range top)
+            session_low: Observation session low (range bottom)
+            is_trading_session: Whether we are in the trading window
+        """
+        if not is_trading_session:
+            return None
+
+        if self.active_trade is not None:
+            return None
+
+        can_trade, reason = self.risk_manager.can_trade()
+        if not can_trade:
+            return None
+
+        session_range = session_high - session_low
+        if session_range <= 0:
+            return None
+
+        if signal == "BUY":
+            # Entry at session low re-entry, SL below the low, TP at midpoint or high
+            stop_loss = session_low - (self.config.pip_value * 5)  # 5 pip buffer
+            risk = current_price - stop_loss
+            take_profit = current_price + (risk * self.config.reward_ratio)
+
+            setup = TradeSetup(
+                direction=Direction.BULLISH,
+                daily_bias=Direction.BULLISH,
+                liquidity_sweep=None,
+                mss=None,
+                fvg=None,
+                order_block=None,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                risk_reward=self.config.reward_ratio,
+            )
+            setup.valid = True  # Range re-entry is the confirmation itself
+            self.current_setup = setup
+
+            logger.info(
+                f"RANGE RE-ENTRY BUY SETUP | Entry: {current_price:.5f} | "
+                f"SL: {stop_loss:.5f} | TP: {take_profit:.5f} | RR: {self.config.reward_ratio}"
+            )
+            return setup
+
+        elif signal == "SELL":
+            # Entry at session high re-entry, SL above the high, TP at midpoint or low
+            stop_loss = session_high + (self.config.pip_value * 5)  # 5 pip buffer
+            risk = stop_loss - current_price
+            take_profit = current_price - (risk * self.config.reward_ratio)
+
+            setup = TradeSetup(
+                direction=Direction.BEARISH,
+                daily_bias=Direction.BEARISH,
+                liquidity_sweep=None,
+                mss=None,
+                fvg=None,
+                order_block=None,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                risk_reward=self.config.reward_ratio,
+            )
+            setup.valid = True  # Range re-entry is the confirmation itself
+            self.current_setup = setup
+
+            logger.info(
+                f"RANGE RE-ENTRY SELL SETUP | Entry: {current_price:.5f} | "
+                f"SL: {stop_loss:.5f} | TP: {take_profit:.5f} | RR: {self.config.reward_ratio}"
+            )
+            return setup
+
+        return None
+
     def evaluate_setup(
         self,
         bias: Direction,
@@ -47,6 +141,7 @@ class TradeEngine:
     ) -> TradeSetup | None:
         """
         Evaluate if all ICT confirmations are present for a valid trade setup.
+        (Secondary/confluence method - range re-entry is the primary signal.)
 
         Long: Bullish bias + Sell-side sweep + Bullish MSS + Bullish FVG + Bullish OB + Retracement
         Short: Bearish bias + Buy-side sweep + Bearish MSS + Bearish FVG + Bearish OB + Retracement

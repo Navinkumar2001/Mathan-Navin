@@ -162,28 +162,55 @@ class LiveTradingBot:
                 # Check if we have a new candle
                 latest_time = df.iloc[-1]["timestamp"]
                 if self.last_candle_time == latest_time:
-                    # No new candle yet, just manage existing trade
-                    if self.trade_engine.has_active_trade:
-                        tick = self.mt5.get_current_tick()
-                        if tick:
-                            current_price = tick["bid"]
+                    # No new candle yet
+                    tick = self.mt5.get_current_tick()
+                    if tick:
+                        current_price = tick["bid"]
+                        # Manage existing trade
+                        if self.trade_engine.has_active_trade:
                             closed = self.trade_engine.manage_trade(current_price, datetime.now(pytz.utc))
                             if closed:
                                 self._on_trade_closed(closed)
+                        # Check range breakout re-entry between candles (trading session)
+                        elif is_trading and not self.trade_engine.has_active_trade:
+                            signal = self.session_manager.check_range_breakout_reentry(current_price)
+                            if signal:
+                                session_low = self.session_manager.session_low
+                                if session_low == float("inf"):
+                                    session_low = 0
+                                setup = self.trade_engine.evaluate_range_reentry(
+                                    signal=signal,
+                                    current_price=current_price,
+                                    session_high=self.session_manager.session_high,
+                                    session_low=session_low,
+                                    is_trading_session=True,
+                                )
+                                if setup and setup.valid:
+                                    account = self.mt5.get_account_info()
+                                    if account:
+                                        self.account_balance = account["balance"]
+                                    trade = self.trade_engine.execute_trade(setup, self.account_balance)
+                                    if trade:
+                                        logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}RANGE RE-ENTRY (tick) EXECUTED!")
+                                        if not self.dry_run:
+                                            self._place_mt5_order(trade)
+                                        self.csv_logger.log_trade(trade)
                     time.sleep(poll_interval)
                     continue
 
                 self.last_candle_time = latest_time
 
-                # Update session data
+                # Update session data (pass current UTC time for IST conversion)
                 latest_candle = df.iloc[-1].to_dict()
-                self.session_manager.update_session_data(latest_candle)
+                utc_now = datetime.now(pytz.utc)
+                self.session_manager.update_session_data(latest_candle, utc_time=utc_now)
                 current_price = latest_candle["close"]
 
                 # Log current state
+                ist_time = self.session_manager.get_ist_time()
                 logger.debug(
-                    f"NY: {ny_time.strftime('%H:%M')} | Price: {current_price:.5f} | "
-                    f"Obs: {is_observation} | Trading: {is_trading}"
+                    f"IST: {ist_time.strftime('%H:%M')} | NY: {ny_time.strftime('%H:%M')} | "
+                    f"Price: {current_price:.5f} | Obs: {is_observation} | Trading: {is_trading}"
                 )
 
                 # --- OBSERVATION PHASE ---
@@ -214,25 +241,29 @@ class LiveTradingBot:
             time.sleep(poll_interval)
 
     def _run_observation(self, df, current_price: float) -> None:
-        """Run observation phase analysis (pre-market)."""
-        # Detect liquidity levels
+        """
+        Run observation phase (IST 09:00-18:30).
+        Track session high and low to build the range boundaries.
+        Also detect ICT structures for confluence.
+        """
+        # Detect liquidity levels (for confluence)
         self.liquidity_engine.detect_liquidity_levels(
             df,
             pdh=self.session_manager.previous_day_high,
             pdl=self.session_manager.previous_day_low,
         )
 
-        # Detect sweeps
+        # Detect sweeps (for confluence)
         sweep = self.liquidity_engine.detect_sweep(df)
 
-        # Detect MSS
+        # Detect MSS (for confluence)
         if sweep:
             mss = self.structure_engine.detect_mss(df, sweep)
 
-        # Detect FVGs
+        # Detect FVGs (for confluence)
         self.fvg_engine.detect_fvg(df)
 
-        # Update bias
+        # Update bias (for confluence)
         latest_sweep = self.liquidity_engine.get_latest_sweep()
         latest_mss = self.structure_engine.get_latest_mss()
 
@@ -246,7 +277,12 @@ class LiveTradingBot:
         )
 
     def _run_trading(self, df, current_price: float, ny_time) -> None:
-        """Run trading phase - look for entries and manage positions."""
+        """
+        Run trading phase (IST 18:30-23:30).
+        Primary signal: Range breakout re-entry.
+        - Price crosses session high and comes back inside → SELL
+        - Price crosses session low and comes back inside → BUY
+        """
         # Manage existing trade
         if self.trade_engine.has_active_trade:
             closed = self.trade_engine.manage_trade(current_price, datetime.now(pytz.utc))
@@ -261,66 +297,30 @@ class LiveTradingBot:
         if tick and not self.risk_manager.check_spread(tick["spread"]):
             return
 
-        # Run strategy detection on latest data
-        sweep = self.liquidity_engine.detect_sweep(df)
-        latest_sweep = self.liquidity_engine.get_latest_sweep()
+        # PRIMARY SIGNAL: Range breakout re-entry
+        signal = self.session_manager.check_range_breakout_reentry(current_price)
 
-        if latest_sweep:
-            mss = self.structure_engine.detect_mss(df, latest_sweep)
-
-        latest_mss = self.structure_engine.get_latest_mss()
-
-        # Detect FVG and OB
-        fvg = self.fvg_engine.detect_fvg(df)
-        latest_fvg = self.fvg_engine.get_latest_fvg(self.bias_engine.current_bias)
-
-        ob = self.ob_engine.detect_order_block(df, latest_sweep, latest_mss)
-        latest_ob = self.ob_engine.get_latest_ob(self.bias_engine.current_bias)
-
-        # Check for retracement into FVG/OB
-        if latest_fvg is None:
-            latest_fvg = self.fvg_engine.check_retracement_into_fvg(
-                current_price, self.bias_engine.current_bias
-            )
-        if latest_ob is None:
-            latest_ob = self.ob_engine.check_retracement_into_ob(
-                current_price, self.bias_engine.current_bias
+        if signal:
+            setup = self.trade_engine.evaluate_range_reentry(
+                signal=signal,
+                current_price=current_price,
+                session_high=self.session_manager.session_high,
+                session_low=self.session_manager.session_low if self.session_manager.session_low != float("inf") else 0,
+                is_trading_session=True,
             )
 
-        # Update bias
-        self.bias_engine.determine_bias(
-            pdh=self.session_manager.previous_day_high,
-            pdl=self.session_manager.previous_day_low,
-            current_high=self.session_manager.session_high,
-            current_low=self.session_manager.session_low if self.session_manager.session_low != float("inf") else 0,
-            latest_sweep=latest_sweep,
-            latest_mss=latest_mss,
-        )
+            if setup and setup.valid:
+                # Refresh account balance
+                account = self.mt5.get_account_info()
+                if account:
+                    self.account_balance = account["balance"]
 
-        # Evaluate trade setup
-        setup = self.trade_engine.evaluate_setup(
-            bias=self.bias_engine.current_bias,
-            sweep=latest_sweep,
-            mss=latest_mss,
-            fvg=latest_fvg,
-            ob=latest_ob,
-            current_price=current_price,
-            is_trading_session=True,
-        )
-
-        # Execute trade if valid setup found
-        if setup and setup.valid:
-            # Refresh account balance
-            account = self.mt5.get_account_info()
-            if account:
-                self.account_balance = account["balance"]
-
-            trade = self.trade_engine.execute_trade(setup, self.account_balance)
-            if trade:
-                logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}TRADE SIGNAL EXECUTED!")
-                if not self.dry_run:
-                    self._place_mt5_order(trade)
-                self.csv_logger.log_trade(trade)
+                trade = self.trade_engine.execute_trade(setup, self.account_balance)
+                if trade:
+                    logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}RANGE RE-ENTRY TRADE EXECUTED!")
+                    if not self.dry_run:
+                        self._place_mt5_order(trade)
+                    self.csv_logger.log_trade(trade)
 
     def _place_mt5_order(self, trade) -> None:
         """Place actual order on MT5."""
