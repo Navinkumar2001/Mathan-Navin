@@ -252,7 +252,7 @@ class LiveTradingBot:
             time.sleep(poll_interval)
 
     def _update_session_from_tick(self, current_price: float) -> None:
-        """Update session high/low from live tick price during observation (09:00-18:30)."""
+        """Update session high/low from live tick price during observation."""
         sm = self.session_manager
         if current_price > sm.session_high:
             sm.session_high = current_price
@@ -261,9 +261,8 @@ class LiveTradingBot:
 
     def _run_observation(self, df, current_price: float) -> None:
         """
-        Run observation phase (IST 09:00-18:30).
+        Run observation phase (07:00-15:30 UTC+3).
         Track session high and low to build the range boundaries.
-        Print live observation details: high, low, current price, range, midpoint.
         Also detect ICT structures for confluence.
         """
         # Update high/low from current price
@@ -302,14 +301,14 @@ class LiveTradingBot:
         )
 
     def _print_observation_details(self, current_price: float) -> None:
-        """Print high, low, and current price for the 09:00-18:30 observation window."""
+        """Print high, low, and current price for the observation window."""
         sm = self.session_manager
-        ist_time = sm.get_ist_time()
+        session_time = sm.get_ist_time()  # Returns time in configured tz (UTC+3)
         session_high = sm.session_high
         session_low = sm.session_low if sm.session_low != float("inf") else 0.0
 
         logger.info(
-            f"📊 {ist_time.strftime('%H:%M:%S')} IST | "
+            f"📊 {session_time.strftime('%H:%M:%S')} MT5 | "
             f"High: {session_high:.5f} | "
             f"Low: {session_low:.5f} | "
             f"Current: {current_price:.5f}"
@@ -317,7 +316,7 @@ class LiveTradingBot:
 
     def _run_trading(self, df, current_price: float, ny_time) -> None:
         """
-        Run trading phase (IST 18:30-23:30).
+        Run trading phase (15:30-21:00 UTC+3).
         Primary signal: Range breakout re-entry.
         - Price crosses session high and comes back inside → SELL
         - Price crosses session low and comes back inside → BUY
@@ -425,20 +424,18 @@ class LiveTradingBot:
 
     def _backfill_observation_session(self) -> None:
         """
-        Backfill session high/low from historical candles for today's 09:00-18:30 IST window.
-        Fetches enough M5 candles, filters by IST time, and computes the true high/low.
+        Backfill session high/low from historical candles for today's observation window.
+        Fetches M5 candles and filters by MT5 server time (UTC+3) for 07:00-15:30.
+
+        IMPORTANT: MT5 candle 'time' field is already in broker server time (UTC+3).
+        The unix timestamp from copy_rates_from_pos represents server time, not UTC.
         """
         import MetaTrader5 as mt5
+        import pandas as pd
 
         sm = self.session_manager
-        ist_now = sm.get_ist_time()
 
-        # Only backfill if we're currently in or past the observation window today
-        if ist_now.time() < sm.obs_start:
-            logger.info("Before observation start, no backfill needed.")
-            return
-
-        # Fetch last 500 M5 candles (covers ~41 hours, more than enough for today)
+        # Fetch last 500 M5 candles (covers ~41 hours)
         tf = mt5.TIMEFRAME_M5
         rates = mt5.copy_rates_from_pos(self.config.symbol, tf, 0, 500)
 
@@ -446,26 +443,29 @@ class LiveTradingBot:
             logger.warning("No candles available for backfill.")
             return
 
-        # MT5 candle 'time' is a Unix timestamp in broker server time (UTC+3 typically)
-        # Convert each candle time to IST and filter for today's observation window
-        import pandas as pd
-
         df = pd.DataFrame(rates)
-        # MT5 returns time as seconds since epoch (UTC)
-        df["timestamp_utc"] = pd.to_datetime(df["time"], unit="s", utc=True)
-        df["timestamp_ist"] = df["timestamp_utc"].dt.tz_convert("Asia/Kolkata")
 
-        # Filter: today's date in IST AND time between obs_start and obs_end
-        today_ist = ist_now.strftime("%Y-%m-%d")
+        # MT5 'time' is already in server time (UTC+3) as a unix timestamp.
+        # Convert directly to datetime without timezone adjustment.
+        df["server_time"] = pd.to_datetime(df["time"], unit="s")
+
+        # Get today's date in server time
+        # Use the latest candle's date as reference for "today"
+        today_server = df["server_time"].iloc[-1].strftime("%Y-%m-%d")
+
+        # Filter: today's date AND time between obs_start (07:00) and obs_end (15:30) inclusive
         mask = (
-            (df["timestamp_ist"].dt.strftime("%Y-%m-%d") == today_ist)
-            & (df["timestamp_ist"].dt.time >= sm.obs_start)
-            & (df["timestamp_ist"].dt.time < sm.obs_end)
+            (df["server_time"].dt.strftime("%Y-%m-%d") == today_server)
+            & (df["server_time"].dt.time >= sm.obs_start)
+            & (df["server_time"].dt.time <= sm.obs_end)
         )
         obs_candles = df[mask]
 
         if obs_candles.empty:
-            logger.warning(f"No candles found for today's observation window ({today_ist} 09:00-18:30 IST).")
+            logger.warning(
+                f"No candles found for today's observation window "
+                f"({today_server} {self.config.observation_start}-{self.config.observation_end})."
+            )
             return
 
         # Compute true high and low from all observation candles
@@ -478,10 +478,11 @@ class LiveTradingBot:
         sm.session_open = obs_candles.iloc[0]["open"]
         sm.session_candle_count = len(obs_candles)
         sm.session_started = True
-        sm.session_date = today_ist
+        sm.session_date = today_server
 
         logger.info(
-            f"Session backfilled | {today_ist} 09:00-18:30 IST | "
+            f"Session backfilled | {today_server} "
+            f"{self.config.observation_start}-{self.config.observation_end} (Server Time) | "
             f"Candles: {len(obs_candles)} | High: {backfill_high:.5f} | Low: {backfill_low:.5f} | "
             f"Range: {backfill_high - backfill_low:.5f}"
         )
