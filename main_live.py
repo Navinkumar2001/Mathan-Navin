@@ -578,6 +578,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="config/config.json", help="Path to config file")
     parser.add_argument("--symbol", type=str, default=None, help="Override trading symbol")
     parser.add_argument("--dry-run", action="store_true", help="Paper trade mode (no real orders)")
+    parser.add_argument("--test-trade", type=str, default=None, choices=["BUY", "SELL"], help="Force a test trade (BUY or SELL) immediately on startup")
     parser.add_argument("--log-level", type=str, default="INFO", help="Log level (DEBUG/INFO/WARNING)")
     args = parser.parse_args()
 
@@ -606,7 +607,60 @@ def main() -> None:
     bot = LiveTradingBot(config, dry_run=args.dry_run)
     signal.signal(signal.SIGINT, lambda s, f: setattr(bot, "running", False))
 
-    bot.start()
+    # If --test-trade, place a test order immediately and exit
+    if args.test_trade:
+        _run_test_trade(bot, args.test_trade)
+    else:
+        bot.start()
+
+
+def _run_test_trade(bot: LiveTradingBot, direction: str) -> None:
+    """Place a test trade immediately to verify order execution works."""
+    logger.info(f"=== TEST TRADE MODE: {direction} ===")
+
+    if not bot.mt5.connect():
+        logger.critical("Failed to connect to MT5.")
+        return
+
+    tick = bot.mt5.get_current_tick()
+    if not tick:
+        logger.critical("Cannot get tick data.")
+        bot.mt5.disconnect()
+        return
+
+    current_price = tick["bid"] if direction == "SELL" else tick["ask"]
+    pip = bot.config.pip_value
+    lot_size = bot.config.lot_size
+
+    if direction == "BUY":
+        sl = current_price - (50 * pip)  # 50 pip SL
+        tp = current_price + (100 * pip)  # 100 pip TP
+        price = tick["ask"]
+    else:
+        sl = current_price + (50 * pip)
+        tp = current_price - (100 * pip)
+        price = tick["bid"]
+
+    logger.info(
+        f"Placing TEST {direction} | Price: {price:.5f} | "
+        f"SL: {sl:.5f} | TP: {tp:.5f} | Lot: {lot_size}"
+    )
+
+    result = bot.mt5.place_order(
+        order_type=direction,
+        volume=lot_size,
+        price=price,
+        sl=sl,
+        tp=tp,
+        comment="ICT_TEST_TRADE",
+    )
+
+    if result:
+        logger.info(f"✅ TEST TRADE SUCCESS | Ticket: {result['ticket']}")
+    else:
+        logger.error("❌ TEST TRADE FAILED")
+
+    bot.mt5.disconnect()
 
 
 if __name__ == "__main__":
