@@ -295,10 +295,8 @@ class TradeEngine:
         if not setup.valid:
             return None
 
-        sl_pips = self.risk_manager.calculate_stop_loss_pips(
-            setup.entry_price, setup.stop_loss
-        )
-        lot_size = self.risk_manager.calculate_position_size(account_balance, sl_pips)
+        # Use fixed lot size from config
+        lot_size = self.config.lot_size
 
         if lot_size <= 0:
             return None
