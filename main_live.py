@@ -117,6 +117,9 @@ class LiveTradingBot:
         # Load previous day data from D1 candle
         self._load_previous_day_data()
 
+        # Backfill session high/low if we're starting mid-observation
+        self._backfill_observation_session()
+
         self.running = True
         logger.info("Bot started. Waiting for trading signals...")
         logger.info(f"Trading session: {self.config.trading_start} - {self.config.trading_end} ({self.config.timezone})")
@@ -457,6 +460,61 @@ class LiveTradingBot:
             )
         else:
             logger.warning("Could not load previous day data from MT5.")
+
+    def _backfill_observation_session(self) -> None:
+        """
+        Backfill session high/low from historical candles if bot starts mid-observation.
+        Loads all candles from observation_start (09:00 IST) to now and computes
+        the true session high and low for the full observation window.
+        """
+        import MetaTrader5 as mt5
+
+        sm = self.session_manager
+        ist_now = sm.get_ist_time()
+
+        # Only backfill if we're currently in or past the observation window today
+        if ist_now.time() < sm.obs_start:
+            logger.info("Before observation start, no backfill needed.")
+            return
+
+        # Calculate the start of observation in UTC for MT5 query
+        obs_start_ist = ist_now.replace(
+            hour=sm.obs_start.hour, minute=sm.obs_start.minute, second=0, microsecond=0
+        )
+        obs_start_utc = obs_start_ist.astimezone(pytz.utc)
+
+        # Get current time as end
+        now_utc = datetime.now(pytz.utc)
+
+        # Fetch candles from observation start to now
+        tf = mt5.TIMEFRAME_M5
+        rates = mt5.copy_rates_range(self.config.symbol, tf, obs_start_utc, now_utc)
+
+        if rates is None or len(rates) == 0:
+            logger.warning("No candles available for backfill.")
+            return
+
+        # Calculate high/low across all candles in the observation window
+        import numpy as np
+        highs = [r[2] for r in rates]  # index 2 = high
+        lows = [r[3] for r in rates]   # index 3 = low
+
+        backfill_high = max(highs)
+        backfill_low = min(lows)
+
+        # Update session manager with backfilled data
+        sm.session_high = backfill_high
+        sm.session_low = backfill_low
+        sm.session_open = rates[0][1]  # index 1 = open
+        sm.session_candle_count = len(rates)
+        sm.session_started = True
+        sm.session_date = ist_now.strftime("%Y-%m-%d")
+
+        logger.info(
+            f"Session backfilled from {obs_start_ist.strftime('%H:%M')} IST | "
+            f"Candles: {len(rates)} | High: {backfill_high:.5f} | Low: {backfill_low:.5f} | "
+            f"Range: {backfill_high - backfill_low:.5f}"
+        )
 
     def _check_new_day(self) -> None:
         """Reset daily counters on new trading day."""
