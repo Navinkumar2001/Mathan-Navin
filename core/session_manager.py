@@ -14,14 +14,14 @@ class SessionManager:
 
     def __init__(self, config: TradingConfig) -> None:
         self.config = config
-        self.ny_tz = pytz.timezone("America/New_York")
+        self.trading_tz = pytz.timezone(config.timezone)
         self.ist_tz = pytz.timezone("Asia/Kolkata")
 
         # Parse session times
-        self.obs_start = self._parse_time(config.observation_start_ny)
-        self.obs_end = self._parse_time(config.observation_end_ny)
-        self.trade_start = self._parse_time(config.trading_start_ny)
-        self.trade_end = self._parse_time(config.trading_end_ny)
+        self.obs_start = self._parse_time(config.observation_start)
+        self.obs_end = self._parse_time(config.observation_end)
+        self.trade_start = self._parse_time(config.trading_start)
+        self.trade_end = self._parse_time(config.trading_end)
 
         # Session state
         self.session_high: float = 0.0
@@ -42,12 +42,12 @@ class SessionManager:
         return dt_time(int(parts[0]), int(parts[1]))
 
     def get_ny_time(self, utc_time: datetime | None = None) -> datetime:
-        """Get current New York time."""
+        """Get current time in the configured trading timezone."""
         if utc_time is None:
             utc_time = datetime.now(pytz.utc)
         elif utc_time.tzinfo is None:
             utc_time = pytz.utc.localize(utc_time)
-        return utc_time.astimezone(self.ny_tz)
+        return utc_time.astimezone(self.trading_tz)
 
     def get_ist_time(self, utc_time: datetime | None = None) -> datetime:
         """Get current IST time."""
@@ -152,6 +152,6 @@ class SessionManager:
             "previous_day_low": self.previous_day_low,
             "is_observation": self.is_observation_session(),
             "is_trading": self.is_trading_session(),
-            "ny_time": self.get_ny_time().strftime("%Y-%m-%d %H:%M:%S"),
+            "trading_tz_time": self.get_ny_time().strftime("%Y-%m-%d %H:%M:%S"),
             "ist_time": self.get_ist_time().strftime("%Y-%m-%d %H:%M:%S"),
         }

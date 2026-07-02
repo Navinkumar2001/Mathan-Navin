@@ -24,7 +24,7 @@ USAGE:
     python main_live.py --log-level DEBUG        # Verbose logging
 
 NOTES:
-    - Bot only trades during the configured NY session (default 08:30-15:00 ET)
+    - Bot only trades during the configured session (default 07:00-15:30 UTC+3)
     - Max 1 trade at a time (configurable)
     - Stops after max daily losses hit
     - Logs all market state and trades to CSV files in data/
@@ -119,7 +119,7 @@ class LiveTradingBot:
 
         self.running = True
         logger.info("Bot started. Waiting for trading signals...")
-        logger.info(f"Trading session: {self.config.trading_start_ny} - {self.config.trading_end_ny} NY time")
+        logger.info(f"Trading session: {self.config.trading_start} - {self.config.trading_end} ({self.config.timezone})")
 
         try:
             self._main_loop()
