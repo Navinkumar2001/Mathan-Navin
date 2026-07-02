@@ -131,10 +131,9 @@ class LiveTradingBot:
             self._shutdown()
 
     def _main_loop(self) -> None:
-        """Main trading loop - runs every candle interval."""
-        # Calculate sleep interval based on timeframe
-        tf_seconds = self._timeframe_to_seconds(self.config.timeframe)
-        poll_interval = min(tf_seconds, 30)  # Poll at most every 30 seconds
+        """Main trading loop - polls every 5 seconds during observation, 30s otherwise."""
+        OBSERVATION_POLL = 5   # Print every 5 seconds during observation
+        TRADING_POLL = 30      # Normal poll interval during trading
 
         while self.running:
             try:
@@ -153,20 +152,25 @@ class LiveTradingBot:
                 is_trading = self.session_manager.is_trading_session()
                 is_session_end = self.session_manager.is_session_end()
 
+                # Use 5-second polling during observation for live updates
+                poll_interval = OBSERVATION_POLL if is_observation else TRADING_POLL
+
                 # Get latest candles
                 df = self.mt5.get_candles(count=200)
                 if df.empty:
                     time.sleep(poll_interval)
                     continue
 
+                # Get current tick for live price
+                tick = self.mt5.get_current_tick()
+                current_price = tick["bid"] if tick else 0.0
+
                 # Check if we have a new candle
                 latest_time = df.iloc[-1]["timestamp"]
                 if self.last_candle_time == latest_time:
-                    # No new candle yet
-                    tick = self.mt5.get_current_tick()
+                    # No new candle yet - but still print observation data every 5s
                     if tick:
-                        current_price = tick["bid"]
-                        # During observation, print live details on tick updates
+                        # During observation, print live session details every 5 seconds
                         if is_observation:
                             self._print_observation_details(current_price)
                         # Manage existing trade
@@ -239,7 +243,7 @@ class LiveTradingBot:
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
-                time.sleep(poll_interval)
+                time.sleep(poll_interval if 'poll_interval' in locals() else 5)
 
             time.sleep(poll_interval)
 
@@ -284,7 +288,7 @@ class LiveTradingBot:
         )
 
     def _print_observation_details(self, current_price: float) -> None:
-        """Print live observation window details: high, low, current price, range, etc."""
+        """Print live observation window details every 5 seconds: high, low, current price, range, etc."""
         sm = self.session_manager
         ist_time = sm.get_ist_time()
         session_low = sm.session_low if sm.session_low != float("inf") else 0.0
@@ -292,6 +296,11 @@ class LiveTradingBot:
         midpoint = sm.session_midpoint
         candle_count = sm.session_candle_count
         bias = self.bias_engine.current_bias.value
+
+        # Get spread from tick
+        tick = self.mt5.get_current_tick()
+        spread = tick["spread"] if tick else 0.0
+        ask = tick["ask"] if tick else 0.0
 
         # Position relative to midpoint
         if midpoint > 0:
@@ -304,21 +313,30 @@ class LiveTradingBot:
         else:
             price_zone = "N/A"
 
+        # Distance from session high/low
+        dist_from_high = (sm.session_high - current_price) if sm.session_high > 0 else 0.0
+        dist_from_low = (current_price - session_low) if session_low > 0 else 0.0
+
         logger.info(
-            f"\n{'─' * 55}\n"
-            f"  📊 OBSERVATION WINDOW | {ist_time.strftime('%H:%M:%S')} IST\n"
-            f"{'─' * 55}\n"
-            f"  Current Price : {current_price:.5f}\n"
+            f"\n{'─' * 60}\n"
+            f"  📊 OBSERVATION WINDOW (Live) | {ist_time.strftime('%H:%M:%S')} IST\n"
+            f"{'─' * 60}\n"
+            f"  Symbol        : {self.config.symbol}\n"
+            f"  Current Bid   : {current_price:.5f}\n"
+            f"  Current Ask   : {ask:.5f}\n"
+            f"  Spread        : {spread:.1f}\n"
             f"  Session High  : {sm.session_high:.5f}\n"
             f"  Session Low   : {session_low:.5f}\n"
             f"  Range         : {session_range:.5f}\n"
             f"  Midpoint      : {midpoint:.5f}\n"
             f"  Price Zone    : {price_zone}\n"
+            f"  Dist to High  : {dist_from_high:.5f}\n"
+            f"  Dist to Low   : {dist_from_low:.5f}\n"
             f"  Candles       : {candle_count}\n"
             f"  Bias          : {bias}\n"
             f"  PDH           : {sm.previous_day_high:.5f}\n"
             f"  PDL           : {sm.previous_day_low:.5f}\n"
-            f"{'─' * 55}"
+            f"{'─' * 60}"
         )
 
     def _run_trading(self, df, current_price: float, ny_time) -> None:
