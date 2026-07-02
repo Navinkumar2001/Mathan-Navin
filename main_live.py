@@ -117,6 +117,9 @@ class LiveTradingBot:
         # Load previous day data from D1 candle
         self._load_previous_day_data()
 
+        # Backfill session high/low if we're starting mid-observation
+        self._backfill_observation_session()
+
         self.running = True
         logger.info("Bot started. Waiting for trading signals...")
         logger.info(f"Trading session: {self.config.trading_start} - {self.config.trading_end} ({self.config.timezone})")
@@ -131,10 +134,9 @@ class LiveTradingBot:
             self._shutdown()
 
     def _main_loop(self) -> None:
-        """Main trading loop - runs every candle interval."""
-        # Calculate sleep interval based on timeframe
-        tf_seconds = self._timeframe_to_seconds(self.config.timeframe)
-        poll_interval = min(tf_seconds, 30)  # Poll at most every 30 seconds
+        """Main trading loop - polls every 5 seconds during observation, 30s otherwise."""
+        OBSERVATION_POLL = 5   # Print every 5 seconds during observation
+        TRADING_POLL = 30      # Normal poll interval during trading
 
         while self.running:
             try:
@@ -153,37 +155,73 @@ class LiveTradingBot:
                 is_trading = self.session_manager.is_trading_session()
                 is_session_end = self.session_manager.is_session_end()
 
+                # Use 5-second polling during observation for live updates
+                poll_interval = OBSERVATION_POLL if is_observation else TRADING_POLL
+
                 # Get latest candles
                 df = self.mt5.get_candles(count=200)
                 if df.empty:
                     time.sleep(poll_interval)
                     continue
 
+                # Get current tick for live price
+                tick = self.mt5.get_current_tick()
+                current_price = tick["bid"] if tick else 0.0
+
                 # Check if we have a new candle
                 latest_time = df.iloc[-1]["timestamp"]
                 if self.last_candle_time == latest_time:
-                    # No new candle yet, just manage existing trade
-                    if self.trade_engine.has_active_trade:
-                        tick = self.mt5.get_current_tick()
-                        if tick:
-                            current_price = tick["bid"]
+                    # No new candle yet - but still print observation data every 5s
+                    if tick:
+                        # During observation, update session high/low from live tick
+                        if is_observation:
+                            self._update_session_from_tick(current_price)
+                            self._print_observation_details(current_price)
+                        # Manage existing trade
+                        if self.trade_engine.has_active_trade:
                             closed = self.trade_engine.manage_trade(current_price, datetime.now(pytz.utc))
                             if closed:
                                 self._on_trade_closed(closed)
+                        # Check range breakout re-entry between candles (trading session)
+                        elif is_trading and not self.trade_engine.has_active_trade:
+                            signal = self.session_manager.check_range_breakout_reentry(current_price)
+                            if signal:
+                                session_low = self.session_manager.session_low
+                                if session_low == float("inf"):
+                                    session_low = 0
+                                setup = self.trade_engine.evaluate_range_reentry(
+                                    signal=signal,
+                                    current_price=current_price,
+                                    session_high=self.session_manager.session_high,
+                                    session_low=session_low,
+                                    is_trading_session=True,
+                                )
+                                if setup and setup.valid:
+                                    account = self.mt5.get_account_info()
+                                    if account:
+                                        self.account_balance = account["balance"]
+                                    trade = self.trade_engine.execute_trade(setup, self.account_balance)
+                                    if trade:
+                                        logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}RANGE RE-ENTRY (tick) EXECUTED!")
+                                        if not self.dry_run:
+                                            self._place_mt5_order(trade)
+                                        self.csv_logger.log_trade(trade)
                     time.sleep(poll_interval)
                     continue
 
                 self.last_candle_time = latest_time
 
-                # Update session data
+                # Update session data (pass current UTC time for IST conversion)
                 latest_candle = df.iloc[-1].to_dict()
-                self.session_manager.update_session_data(latest_candle)
+                utc_now = datetime.now(pytz.utc)
+                self.session_manager.update_session_data(latest_candle, utc_time=utc_now)
                 current_price = latest_candle["close"]
 
                 # Log current state
+                ist_time = self.session_manager.get_ist_time()
                 logger.debug(
-                    f"NY: {ny_time.strftime('%H:%M')} | Price: {current_price:.5f} | "
-                    f"Obs: {is_observation} | Trading: {is_trading}"
+                    f"IST: {ist_time.strftime('%H:%M')} | NY: {ny_time.strftime('%H:%M')} | "
+                    f"Price: {current_price:.5f} | Obs: {is_observation} | Trading: {is_trading}"
                 )
 
                 # --- OBSERVATION PHASE ---
@@ -209,30 +247,47 @@ class LiveTradingBot:
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
-                time.sleep(poll_interval)
+                time.sleep(poll_interval if 'poll_interval' in locals() else 5)
 
             time.sleep(poll_interval)
 
+    def _update_session_from_tick(self, current_price: float) -> None:
+        """Update session high/low from live tick price during observation."""
+        sm = self.session_manager
+        if current_price > sm.session_high:
+            sm.session_high = current_price
+        if current_price < sm.session_low:
+            sm.session_low = current_price
+
     def _run_observation(self, df, current_price: float) -> None:
-        """Run observation phase analysis (pre-market)."""
-        # Detect liquidity levels
+        """
+        Run observation phase (07:00-15:30 UTC+3).
+        Track session high and low to build the range boundaries.
+        Also detect ICT structures for confluence.
+        """
+        # Update high/low from current price
+        self._update_session_from_tick(current_price)
+        # Print observation details
+        self._print_observation_details(current_price)
+
+        # Detect liquidity levels (for confluence)
         self.liquidity_engine.detect_liquidity_levels(
             df,
             pdh=self.session_manager.previous_day_high,
             pdl=self.session_manager.previous_day_low,
         )
 
-        # Detect sweeps
+        # Detect sweeps (for confluence)
         sweep = self.liquidity_engine.detect_sweep(df)
 
-        # Detect MSS
+        # Detect MSS (for confluence)
         if sweep:
             mss = self.structure_engine.detect_mss(df, sweep)
 
-        # Detect FVGs
+        # Detect FVGs (for confluence)
         self.fvg_engine.detect_fvg(df)
 
-        # Update bias
+        # Update bias (for confluence)
         latest_sweep = self.liquidity_engine.get_latest_sweep()
         latest_mss = self.structure_engine.get_latest_mss()
 
@@ -245,8 +300,27 @@ class LiveTradingBot:
             latest_mss=latest_mss,
         )
 
+    def _print_observation_details(self, current_price: float) -> None:
+        """Print high, low, and current price for the observation window."""
+        sm = self.session_manager
+        session_time = sm.get_ist_time()  # Returns time in configured tz (UTC+3)
+        session_high = sm.session_high
+        session_low = sm.session_low if sm.session_low != float("inf") else 0.0
+
+        logger.info(
+            f"📊 {session_time.strftime('%H:%M:%S')} MT5 | "
+            f"High: {session_high:.5f} | "
+            f"Low: {session_low:.5f} | "
+            f"Current: {current_price:.5f}"
+        )
+
     def _run_trading(self, df, current_price: float, ny_time) -> None:
-        """Run trading phase - look for entries and manage positions."""
+        """
+        Run trading phase (15:30-21:00 UTC+3).
+        Primary signal: Range breakout re-entry.
+        - Price crosses session high and comes back inside → SELL
+        - Price crosses session low and comes back inside → BUY
+        """
         # Manage existing trade
         if self.trade_engine.has_active_trade:
             closed = self.trade_engine.manage_trade(current_price, datetime.now(pytz.utc))
@@ -261,66 +335,30 @@ class LiveTradingBot:
         if tick and not self.risk_manager.check_spread(tick["spread"]):
             return
 
-        # Run strategy detection on latest data
-        sweep = self.liquidity_engine.detect_sweep(df)
-        latest_sweep = self.liquidity_engine.get_latest_sweep()
+        # PRIMARY SIGNAL: Range breakout re-entry
+        signal = self.session_manager.check_range_breakout_reentry(current_price)
 
-        if latest_sweep:
-            mss = self.structure_engine.detect_mss(df, latest_sweep)
-
-        latest_mss = self.structure_engine.get_latest_mss()
-
-        # Detect FVG and OB
-        fvg = self.fvg_engine.detect_fvg(df)
-        latest_fvg = self.fvg_engine.get_latest_fvg(self.bias_engine.current_bias)
-
-        ob = self.ob_engine.detect_order_block(df, latest_sweep, latest_mss)
-        latest_ob = self.ob_engine.get_latest_ob(self.bias_engine.current_bias)
-
-        # Check for retracement into FVG/OB
-        if latest_fvg is None:
-            latest_fvg = self.fvg_engine.check_retracement_into_fvg(
-                current_price, self.bias_engine.current_bias
-            )
-        if latest_ob is None:
-            latest_ob = self.ob_engine.check_retracement_into_ob(
-                current_price, self.bias_engine.current_bias
+        if signal:
+            setup = self.trade_engine.evaluate_range_reentry(
+                signal=signal,
+                current_price=current_price,
+                session_high=self.session_manager.session_high,
+                session_low=self.session_manager.session_low if self.session_manager.session_low != float("inf") else 0,
+                is_trading_session=True,
             )
 
-        # Update bias
-        self.bias_engine.determine_bias(
-            pdh=self.session_manager.previous_day_high,
-            pdl=self.session_manager.previous_day_low,
-            current_high=self.session_manager.session_high,
-            current_low=self.session_manager.session_low if self.session_manager.session_low != float("inf") else 0,
-            latest_sweep=latest_sweep,
-            latest_mss=latest_mss,
-        )
+            if setup and setup.valid:
+                # Refresh account balance
+                account = self.mt5.get_account_info()
+                if account:
+                    self.account_balance = account["balance"]
 
-        # Evaluate trade setup
-        setup = self.trade_engine.evaluate_setup(
-            bias=self.bias_engine.current_bias,
-            sweep=latest_sweep,
-            mss=latest_mss,
-            fvg=latest_fvg,
-            ob=latest_ob,
-            current_price=current_price,
-            is_trading_session=True,
-        )
-
-        # Execute trade if valid setup found
-        if setup and setup.valid:
-            # Refresh account balance
-            account = self.mt5.get_account_info()
-            if account:
-                self.account_balance = account["balance"]
-
-            trade = self.trade_engine.execute_trade(setup, self.account_balance)
-            if trade:
-                logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}TRADE SIGNAL EXECUTED!")
-                if not self.dry_run:
-                    self._place_mt5_order(trade)
-                self.csv_logger.log_trade(trade)
+                trade = self.trade_engine.execute_trade(setup, self.account_balance)
+                if trade:
+                    logger.info(f"{'[DRY RUN] ' if self.dry_run else ''}RANGE RE-ENTRY TRADE EXECUTED!")
+                    if not self.dry_run:
+                        self._place_mt5_order(trade)
+                    self.csv_logger.log_trade(trade)
 
     def _place_mt5_order(self, trade) -> None:
         """Place actual order on MT5."""
@@ -383,6 +421,71 @@ class LiveTradingBot:
             )
         else:
             logger.warning("Could not load previous day data from MT5.")
+
+    def _backfill_observation_session(self) -> None:
+        """
+        Backfill session high/low from historical candles for today's observation window.
+        Fetches M5 candles and filters by MT5 server time (UTC+3) for 07:00-15:30.
+
+        IMPORTANT: MT5 candle 'time' field is already in broker server time (UTC+3).
+        The unix timestamp from copy_rates_from_pos represents server time, not UTC.
+        """
+        import MetaTrader5 as mt5
+        import pandas as pd
+
+        sm = self.session_manager
+
+        # Fetch last 500 M5 candles (covers ~41 hours)
+        tf = mt5.TIMEFRAME_M5
+        rates = mt5.copy_rates_from_pos(self.config.symbol, tf, 0, 500)
+
+        if rates is None or len(rates) == 0:
+            logger.warning("No candles available for backfill.")
+            return
+
+        df = pd.DataFrame(rates)
+
+        # MT5 'time' is already in server time (UTC+3) as a unix timestamp.
+        # Convert directly to datetime without timezone adjustment.
+        df["server_time"] = pd.to_datetime(df["time"], unit="s")
+
+        # Get today's date in server time
+        # Use the latest candle's date as reference for "today"
+        today_server = df["server_time"].iloc[-1].strftime("%Y-%m-%d")
+
+        # Filter: today's date AND time between obs_start (07:00) and obs_end (15:30) inclusive
+        mask = (
+            (df["server_time"].dt.strftime("%Y-%m-%d") == today_server)
+            & (df["server_time"].dt.time >= sm.obs_start)
+            & (df["server_time"].dt.time <= sm.obs_end)
+        )
+        obs_candles = df[mask]
+
+        if obs_candles.empty:
+            logger.warning(
+                f"No candles found for today's observation window "
+                f"({today_server} {self.config.observation_start}-{self.config.observation_end})."
+            )
+            return
+
+        # Compute true high and low from all observation candles
+        backfill_high = obs_candles["high"].max()
+        backfill_low = obs_candles["low"].min()
+
+        # Update session manager
+        sm.session_high = backfill_high
+        sm.session_low = backfill_low
+        sm.session_open = obs_candles.iloc[0]["open"]
+        sm.session_candle_count = len(obs_candles)
+        sm.session_started = True
+        sm.session_date = today_server
+
+        logger.info(
+            f"Session backfilled | {today_server} "
+            f"{self.config.observation_start}-{self.config.observation_end} (Server Time) | "
+            f"Candles: {len(obs_candles)} | High: {backfill_high:.5f} | Low: {backfill_low:.5f} | "
+            f"Range: {backfill_high - backfill_low:.5f}"
+        )
 
     def _check_new_day(self) -> None:
         """Reset daily counters on new trading day."""

@@ -153,102 +153,106 @@ class BacktestEngine:
                 day_high = max(day_high, candle["high"])
                 day_low = min(day_low, candle["low"])
 
-            # Update session manager
-            self.session_manager.update_session_data({
-                "high": candle["high"],
-                "low": candle["low"],
-                "open": candle["open"],
-                "close": candle["close"],
-            })
+            # Determine IST time from candle timestamp for session checks
+            # If data has timezone-aware timestamps, convert; otherwise assume UTC
+            if isinstance(candle_time, datetime):
+                if candle_time.tzinfo is None:
+                    import pytz
+                    utc_time = pytz.utc.localize(candle_time)
+                else:
+                    utc_time = candle_time
+            else:
+                import pytz
+                utc_time = pytz.utc.localize(pd.Timestamp(candle_time).to_pydatetime())
+
+            # Update session manager with proper UTC time for IST conversion
+            self.session_manager.update_session_data(
+                {
+                    "high": candle["high"],
+                    "low": candle["low"],
+                    "open": candle["open"],
+                    "close": candle["close"],
+                },
+                utc_time=utc_time,
+            )
 
             # Get window of data for analysis
             window = data.iloc[max(0, i - window_size):i + 1].copy()
 
-            # Simulate session check using hour (approximate NY time mapping)
-            hour = candle_time.hour if isinstance(candle_time, datetime) else 0
-            is_observation = 0 <= hour <= 8
-            is_trading = 8 <= hour <= 15
+            # Use IST-based session checks
+            is_observation = self.session_manager.is_observation_session(utc_time)
+            is_trading = self.session_manager.is_trading_session(utc_time)
 
-            # Step 1: Detect liquidity levels
-            self.liquidity_engine.detect_liquidity_levels(
-                window,
-                self.session_manager.previous_day_high,
-                self.session_manager.previous_day_low,
-            )
+            # During observation: detect ICT structures for confluence
+            if is_observation:
+                self.liquidity_engine.detect_liquidity_levels(
+                    window,
+                    self.session_manager.previous_day_high,
+                    self.session_manager.previous_day_low,
+                )
+                sweep = self.liquidity_engine.detect_sweep(window)
+                latest_sweep = self.liquidity_engine.get_latest_sweep()
+                if latest_sweep:
+                    mss = self.structure_engine.detect_mss(window, latest_sweep)
+                fvg = self.fvg_engine.detect_fvg(window)
+                latest_mss = self.structure_engine.get_latest_mss()
+                ob = self.ob_engine.detect_order_block(window, latest_sweep, latest_mss)
 
-            # Step 2: Check for sweep
-            sweep = self.liquidity_engine.detect_sweep(window)
+                self.bias_engine.determine_bias(
+                    self.session_manager.previous_day_high,
+                    self.session_manager.previous_day_low,
+                    self.session_manager.session_high,
+                    self.session_manager.session_low,
+                    latest_sweep,
+                    latest_mss,
+                )
 
-            # Step 3: Detect MSS
-            latest_sweep = self.liquidity_engine.get_latest_sweep()
-            mss = self.structure_engine.detect_mss(window, latest_sweep)
-
-            # Step 4: Detect FVG
-            fvg = self.fvg_engine.detect_fvg(window)
-
-            # Step 5: Detect Order Block
-            latest_mss = self.structure_engine.get_latest_mss()
-            ob = self.ob_engine.detect_order_block(window, latest_sweep, latest_mss)
-
-            # Step 6: Determine bias
-            bias = self.bias_engine.determine_bias(
-                self.session_manager.previous_day_high,
-                self.session_manager.previous_day_low,
-                self.session_manager.session_high,
-                self.session_manager.session_low,
-                latest_sweep,
-                latest_mss,
-            )
-
-            # Step 7: Manage active trade
+            # Step: Manage active trade (any time)
             if self.trade_engine.has_active_trade:
                 closed = self.trade_engine.manage_trade(candle["close"], candle_time)
                 if closed:
                     self._record_backtest_trade(closed)
 
-                # Session end exit
-                if is_trading and hour >= 14 and self.config.session_close_exit:
+                # Session end exit (IST 23:25+)
+                if self.session_manager.is_session_end(utc_time) and self.config.session_close_exit:
                     closed = self.trade_engine.session_exit(candle["close"], candle_time)
                     if closed:
                         self._record_backtest_trade(closed)
 
-            # Step 8: Check for retracement and evaluate setup
+            # During trading session: check for range breakout re-entry
             elif is_trading and not self.trade_engine.has_active_trade:
                 current_price = candle["close"]
 
-                # Check retracement into FVG
-                fvg_for_entry = self.fvg_engine.check_retracement_into_fvg(
-                    current_price, bias
-                )
+                # PRIMARY: Range breakout re-entry signal
+                signal = self.session_manager.check_range_breakout_reentry(current_price)
 
-                # Check retracement into OB
-                ob_for_entry = self.ob_engine.check_retracement_into_ob(
-                    current_price, bias
-                )
+                if signal:
+                    session_low = self.session_manager.session_low
+                    if session_low == float("inf"):
+                        session_low = 0
 
-                # Use detected or retracement zones
-                active_fvg = fvg_for_entry or self.fvg_engine.get_latest_fvg(bias)
-                active_ob = ob_for_entry or self.ob_engine.get_latest_ob(bias)
+                    setup = self.trade_engine.evaluate_range_reentry(
+                        signal=signal,
+                        current_price=current_price,
+                        session_high=self.session_manager.session_high,
+                        session_low=session_low,
+                        is_trading_session=True,
+                    )
 
-                setup = self.trade_engine.evaluate_setup(
-                    bias=bias,
-                    sweep=latest_sweep,
-                    mss=latest_mss,
-                    fvg=active_fvg,
-                    ob=active_ob,
-                    current_price=current_price,
-                    is_trading_session=is_trading,
-                )
-
-                if setup and setup.valid:
-                    trade = self.trade_engine.execute_trade(setup, self.current_balance)
-                    if trade:
-                        trade.entry_time = candle_time
+                    if setup and setup.valid:
+                        trade = self.trade_engine.execute_trade(setup, self.current_balance)
+                        if trade:
+                            trade.entry_time = candle_time
 
             # Update equity curve
             self.equity_curve.append(self.current_balance)
 
             # Log market state
+            bias = self.bias_engine.current_bias
+            latest_sweep = self.liquidity_engine.get_latest_sweep()
+            latest_mss = self.structure_engine.get_latest_mss()
+            fvg = self.fvg_engine.get_latest_fvg(bias)
+            ob = self.ob_engine.get_latest_ob(bias)
             self._log_state(candle, bias, latest_sweep, latest_mss, fvg, ob)
 
         # Close any remaining trade
