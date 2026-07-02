@@ -453,11 +453,11 @@ class LiveTradingBot:
         # Use the latest candle's date as reference for "today"
         today_server = df["server_time"].iloc[-1].strftime("%Y-%m-%d")
 
-        # Filter: today's date AND time between obs_start (07:00) and obs_end (15:30)
+        # Filter: today's date AND time between obs_start (07:00) and obs_end (15:30) inclusive
         mask = (
             (df["server_time"].dt.strftime("%Y-%m-%d") == today_server)
             & (df["server_time"].dt.time >= sm.obs_start)
-            & (df["server_time"].dt.time < sm.obs_end)
+            & (df["server_time"].dt.time <= sm.obs_end)
         )
         obs_candles = df[mask]
 
