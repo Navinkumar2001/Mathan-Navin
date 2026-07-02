@@ -170,8 +170,9 @@ class LiveTradingBot:
                 if self.last_candle_time == latest_time:
                     # No new candle yet - but still print observation data every 5s
                     if tick:
-                        # During observation, print live session details every 5 seconds
+                        # During observation, update session high/low from live tick
                         if is_observation:
+                            self._update_session_from_tick(current_price)
                             self._print_observation_details(current_price)
                         # Manage existing trade
                         if self.trade_engine.has_active_trade:
@@ -247,6 +248,14 @@ class LiveTradingBot:
 
             time.sleep(poll_interval)
 
+    def _update_session_from_tick(self, current_price: float) -> None:
+        """Update session high/low from live tick price during observation (09:00-18:30)."""
+        sm = self.session_manager
+        if current_price > sm.session_high:
+            sm.session_high = current_price
+        if current_price < sm.session_low:
+            sm.session_low = current_price
+
     def _run_observation(self, df, current_price: float) -> None:
         """
         Run observation phase (IST 09:00-18:30).
@@ -254,6 +263,8 @@ class LiveTradingBot:
         Print live observation details: high, low, current price, range, midpoint.
         Also detect ICT structures for confluence.
         """
+        # Update high/low from current price
+        self._update_session_from_tick(current_price)
         # Print observation details
         self._print_observation_details(current_price)
 
