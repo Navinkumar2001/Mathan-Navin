@@ -1,14 +1,13 @@
 """Session timing and management for ICT observation and trading windows.
 
 Strategy Logic:
-  - Observation (IST 09:00-18:30): Track session High and Low, mark range boundaries.
-  - Trading (IST 18:30-23:30): If price crosses a boundary and re-enters the range:
+  - Observation (NY 00:00-08:30): Track session High and Low, mark range boundaries.
+  - Trading (NY 08:30-14:00): If price crosses a boundary and re-enters the range:
       * Crossed HIGH boundary and came back inside → SELL
       * Crossed LOW boundary and came back inside → BUY
 
-Timezone Mapping:
-  IST 09:00-18:30  =  NY 00:00-08:30  =  MT5(UTC+3) 07:00-15:30  [Observation]
-  IST 18:30-23:30  =  NY 08:30-14:00  =  MT5(UTC+3) 15:30-21:00  [Trading]
+Timezone:
+  All session times are in the configured timezone (default: America/New_York).
 """
 
 from datetime import datetime, time as dt_time
@@ -25,14 +24,14 @@ class SessionManager:
 
     def __init__(self, config: TradingConfig) -> None:
         self.config = config
-        self.ist_tz = pytz.timezone("Asia/Kolkata")
+        self.session_tz = pytz.timezone(config.timezone)  # Configured timezone (NY)
         self.mt5_tz = pytz.timezone("Etc/GMT-3")  # UTC+3
 
-        # Parse session times (all in IST)
-        self.obs_start = self._parse_time(config.observation_start)  # 09:00 IST
-        self.obs_end = self._parse_time(config.observation_end)      # 18:30 IST
-        self.trade_start = self._parse_time(config.trading_start)    # 18:30 IST
-        self.trade_end = self._parse_time(config.trading_end)        # 23:30 IST
+        # Parse session times (all in configured timezone)
+        self.obs_start = self._parse_time(config.observation_start)  # 00:00 NY
+        self.obs_end = self._parse_time(config.observation_end)      # 08:30 NY
+        self.trade_start = self._parse_time(config.trading_start)    # 08:30 NY
+        self.trade_end = self._parse_time(config.trading_end)        # 14:00 NY
 
         # Session range (built during observation)
         self.session_high: float = 0.0
@@ -58,12 +57,12 @@ class SessionManager:
         return dt_time(int(parts[0]), int(parts[1]))
 
     def get_ist_time(self, utc_time: datetime | None = None) -> datetime:
-        """Get current IST time."""
+        """Get current time in configured session timezone (NY)."""
         if utc_time is None:
             utc_time = datetime.now(pytz.utc)
         elif utc_time.tzinfo is None:
             utc_time = pytz.utc.localize(utc_time)
-        return utc_time.astimezone(self.ist_tz)
+        return utc_time.astimezone(self.session_tz)
 
     def get_mt5_time(self, utc_time: datetime | None = None) -> datetime:
         """Get current MT5 time (UTC+3)."""
@@ -83,29 +82,29 @@ class SessionManager:
         return utc_time.astimezone(ny_tz)
 
     def is_observation_session(self, utc_time: datetime | None = None) -> bool:
-        """Check if current time is within observation session (IST 09:00-18:30)."""
-        ist_now = self.get_ist_time(utc_time)
-        current_time = ist_now.time()
+        """Check if current time is within observation session (NY 00:00-08:30)."""
+        now = self.get_ist_time(utc_time)
+        current_time = now.time()
         return self.obs_start <= current_time < self.obs_end
 
     def is_trading_session(self, utc_time: datetime | None = None) -> bool:
-        """Check if current time is within trading session (IST 18:30-23:30)."""
-        ist_now = self.get_ist_time(utc_time)
-        current_time = ist_now.time()
+        """Check if current time is within trading session (NY 08:30-14:00)."""
+        now = self.get_ist_time(utc_time)
+        current_time = now.time()
         return self.trade_start <= current_time <= self.trade_end
 
     def is_session_end(self, utc_time: datetime | None = None) -> bool:
         """Check if trading session is ending (within 5 minutes of close)."""
-        ist_now = self.get_ist_time(utc_time)
-        current_time = ist_now.time()
+        now = self.get_ist_time(utc_time)
+        current_time = now.time()
         end_minutes = self.trade_end.hour * 60 + self.trade_end.minute
         current_minutes = current_time.hour * 60 + current_time.minute
         return 0 <= (end_minutes - current_minutes) <= 5
 
     def update_session_data(self, candle: dict[str, Any], utc_time: datetime | None = None) -> None:
         """Update session statistics with new candle data."""
-        ist_now = self.get_ist_time(utc_time)
-        current_date = ist_now.strftime("%Y-%m-%d")
+        now = self.get_ist_time(utc_time)
+        current_date = now.strftime("%Y-%m-%d")
 
         # Reset session on new day
         if current_date != self.session_date:
@@ -238,7 +237,7 @@ class SessionManager:
             "previous_day_low": self.previous_day_low,
             "is_observation": self.is_observation_session(),
             "is_trading": self.is_trading_session(),
-            "ist_time": self.get_ist_time().strftime("%Y-%m-%d %H:%M:%S"),
+            "session_time": self.get_ist_time().strftime("%Y-%m-%d %H:%M:%S"),
             "mt5_time": self.get_mt5_time().strftime("%Y-%m-%d %H:%M:%S"),
             "ny_time": self.get_ny_time().strftime("%Y-%m-%d %H:%M:%S"),
         }
