@@ -302,55 +302,17 @@ class LiveTradingBot:
         )
 
     def _print_observation_details(self, current_price: float) -> None:
-        """Print live observation window details every 5 seconds: high, low, current price, range, etc."""
+        """Print high, low, and current price for the 09:00-18:30 observation window."""
         sm = self.session_manager
         ist_time = sm.get_ist_time()
+        session_high = sm.session_high
         session_low = sm.session_low if sm.session_low != float("inf") else 0.0
-        session_range = sm.session_range
-        midpoint = sm.session_midpoint
-        candle_count = sm.session_candle_count
-        bias = self.bias_engine.current_bias.value
-
-        # Get spread from tick
-        tick = self.mt5.get_current_tick()
-        spread = tick["spread"] if tick else 0.0
-        ask = tick["ask"] if tick else 0.0
-
-        # Position relative to midpoint
-        if midpoint > 0:
-            if current_price > midpoint:
-                price_zone = "PREMIUM (above midpoint)"
-            elif current_price < midpoint:
-                price_zone = "DISCOUNT (below midpoint)"
-            else:
-                price_zone = "AT MIDPOINT"
-        else:
-            price_zone = "N/A"
-
-        # Distance from session high/low
-        dist_from_high = (sm.session_high - current_price) if sm.session_high > 0 else 0.0
-        dist_from_low = (current_price - session_low) if session_low > 0 else 0.0
 
         logger.info(
-            f"\n{'─' * 60}\n"
-            f"  📊 OBSERVATION WINDOW (Live) | {ist_time.strftime('%H:%M:%S')} IST\n"
-            f"{'─' * 60}\n"
-            f"  Symbol        : {self.config.symbol}\n"
-            f"  Current Bid   : {current_price:.5f}\n"
-            f"  Current Ask   : {ask:.5f}\n"
-            f"  Spread        : {spread:.1f}\n"
-            f"  Session High  : {sm.session_high:.5f}\n"
-            f"  Session Low   : {session_low:.5f}\n"
-            f"  Range         : {session_range:.5f}\n"
-            f"  Midpoint      : {midpoint:.5f}\n"
-            f"  Price Zone    : {price_zone}\n"
-            f"  Dist to High  : {dist_from_high:.5f}\n"
-            f"  Dist to Low   : {dist_from_low:.5f}\n"
-            f"  Candles       : {candle_count}\n"
-            f"  Bias          : {bias}\n"
-            f"  PDH           : {sm.previous_day_high:.5f}\n"
-            f"  PDL           : {sm.previous_day_low:.5f}\n"
-            f"{'─' * 60}"
+            f"📊 {ist_time.strftime('%H:%M:%S')} IST | "
+            f"High: {session_high:.5f} | "
+            f"Low: {session_low:.5f} | "
+            f"Current: {current_price:.5f}"
         )
 
     def _run_trading(self, df, current_price: float, ny_time) -> None:
@@ -463,9 +425,8 @@ class LiveTradingBot:
 
     def _backfill_observation_session(self) -> None:
         """
-        Backfill session high/low from historical candles if bot starts mid-observation.
-        Loads all candles from observation_start (09:00 IST) to now and computes
-        the true session high and low for the full observation window.
+        Backfill session high/low from historical candles for today's 09:00-18:30 IST window.
+        Fetches enough M5 candles, filters by IST time, and computes the true high/low.
         """
         import MetaTrader5 as mt5
 
@@ -477,42 +438,51 @@ class LiveTradingBot:
             logger.info("Before observation start, no backfill needed.")
             return
 
-        # Calculate the start of observation in UTC for MT5 query
-        obs_start_ist = ist_now.replace(
-            hour=sm.obs_start.hour, minute=sm.obs_start.minute, second=0, microsecond=0
-        )
-        obs_start_utc = obs_start_ist.astimezone(pytz.utc)
-
-        # Get current time as end
-        now_utc = datetime.now(pytz.utc)
-
-        # Fetch candles from observation start to now
+        # Fetch last 500 M5 candles (covers ~41 hours, more than enough for today)
         tf = mt5.TIMEFRAME_M5
-        rates = mt5.copy_rates_range(self.config.symbol, tf, obs_start_utc, now_utc)
+        rates = mt5.copy_rates_from_pos(self.config.symbol, tf, 0, 500)
 
         if rates is None or len(rates) == 0:
             logger.warning("No candles available for backfill.")
             return
 
-        # Calculate high/low across all candles in the observation window
-        import numpy as np
-        highs = [r[2] for r in rates]  # index 2 = high
-        lows = [r[3] for r in rates]   # index 3 = low
+        # MT5 candle 'time' is a Unix timestamp in broker server time (UTC+3 typically)
+        # Convert each candle time to IST and filter for today's observation window
+        import pandas as pd
 
-        backfill_high = max(highs)
-        backfill_low = min(lows)
+        df = pd.DataFrame(rates)
+        # MT5 returns time as seconds since epoch (UTC)
+        df["timestamp_utc"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df["timestamp_ist"] = df["timestamp_utc"].dt.tz_convert("Asia/Kolkata")
 
-        # Update session manager with backfilled data
+        # Filter: today's date in IST AND time between obs_start and obs_end
+        today_ist = ist_now.strftime("%Y-%m-%d")
+        mask = (
+            (df["timestamp_ist"].dt.strftime("%Y-%m-%d") == today_ist)
+            & (df["timestamp_ist"].dt.time >= sm.obs_start)
+            & (df["timestamp_ist"].dt.time < sm.obs_end)
+        )
+        obs_candles = df[mask]
+
+        if obs_candles.empty:
+            logger.warning(f"No candles found for today's observation window ({today_ist} 09:00-18:30 IST).")
+            return
+
+        # Compute true high and low from all observation candles
+        backfill_high = obs_candles["high"].max()
+        backfill_low = obs_candles["low"].min()
+
+        # Update session manager
         sm.session_high = backfill_high
         sm.session_low = backfill_low
-        sm.session_open = rates[0][1]  # index 1 = open
-        sm.session_candle_count = len(rates)
+        sm.session_open = obs_candles.iloc[0]["open"]
+        sm.session_candle_count = len(obs_candles)
         sm.session_started = True
-        sm.session_date = ist_now.strftime("%Y-%m-%d")
+        sm.session_date = today_ist
 
         logger.info(
-            f"Session backfilled from {obs_start_ist.strftime('%H:%M')} IST | "
-            f"Candles: {len(rates)} | High: {backfill_high:.5f} | Low: {backfill_low:.5f} | "
+            f"Session backfilled | {today_ist} 09:00-18:30 IST | "
+            f"Candles: {len(obs_candles)} | High: {backfill_high:.5f} | Low: {backfill_low:.5f} | "
             f"Range: {backfill_high - backfill_low:.5f}"
         )
 
