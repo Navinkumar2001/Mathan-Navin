@@ -146,11 +146,17 @@ class MT5Connector:
         }
 
     def _get_filling_mode(self, symbol_info) -> int:
-        """Determine the supported filling mode for a symbol."""
+        """Determine the supported filling mode for a symbol.
+        
+        filling_mode is a bitmask:
+          bit 0 (1) = Fill or Kill supported
+          bit 1 (2) = Immediate or Cancel supported
+        If neither, use RETURN mode.
+        """
         filling = symbol_info.filling_mode
-        if filling & mt5.SYMBOL_FILLING_FOK:
+        if filling & 1:  # FOK supported
             return mt5.ORDER_FILLING_FOK
-        elif filling & mt5.SYMBOL_FILLING_IOC:
+        elif filling & 2:  # IOC supported
             return mt5.ORDER_FILLING_IOC
         else:
             return mt5.ORDER_FILLING_RETURN
