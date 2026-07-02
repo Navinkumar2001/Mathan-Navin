@@ -166,6 +166,9 @@ class LiveTradingBot:
                     tick = self.mt5.get_current_tick()
                     if tick:
                         current_price = tick["bid"]
+                        # During observation, print live details on tick updates
+                        if is_observation:
+                            self._print_observation_details(current_price)
                         # Manage existing trade
                         if self.trade_engine.has_active_trade:
                             closed = self.trade_engine.manage_trade(current_price, datetime.now(pytz.utc))
@@ -244,8 +247,12 @@ class LiveTradingBot:
         """
         Run observation phase (IST 09:00-18:30).
         Track session high and low to build the range boundaries.
+        Print live observation details: high, low, current price, range, midpoint.
         Also detect ICT structures for confluence.
         """
+        # Print observation details
+        self._print_observation_details(current_price)
+
         # Detect liquidity levels (for confluence)
         self.liquidity_engine.detect_liquidity_levels(
             df,
@@ -274,6 +281,44 @@ class LiveTradingBot:
             current_low=self.session_manager.session_low if self.session_manager.session_low != float("inf") else 0,
             latest_sweep=latest_sweep,
             latest_mss=latest_mss,
+        )
+
+    def _print_observation_details(self, current_price: float) -> None:
+        """Print live observation window details: high, low, current price, range, etc."""
+        sm = self.session_manager
+        ist_time = sm.get_ist_time()
+        session_low = sm.session_low if sm.session_low != float("inf") else 0.0
+        session_range = sm.session_range
+        midpoint = sm.session_midpoint
+        candle_count = sm.session_candle_count
+        bias = self.bias_engine.current_bias.value
+
+        # Position relative to midpoint
+        if midpoint > 0:
+            if current_price > midpoint:
+                price_zone = "PREMIUM (above midpoint)"
+            elif current_price < midpoint:
+                price_zone = "DISCOUNT (below midpoint)"
+            else:
+                price_zone = "AT MIDPOINT"
+        else:
+            price_zone = "N/A"
+
+        logger.info(
+            f"\n{'─' * 55}\n"
+            f"  📊 OBSERVATION WINDOW | {ist_time.strftime('%H:%M:%S')} IST\n"
+            f"{'─' * 55}\n"
+            f"  Current Price : {current_price:.5f}\n"
+            f"  Session High  : {sm.session_high:.5f}\n"
+            f"  Session Low   : {session_low:.5f}\n"
+            f"  Range         : {session_range:.5f}\n"
+            f"  Midpoint      : {midpoint:.5f}\n"
+            f"  Price Zone    : {price_zone}\n"
+            f"  Candles       : {candle_count}\n"
+            f"  Bias          : {bias}\n"
+            f"  PDH           : {sm.previous_day_high:.5f}\n"
+            f"  PDL           : {sm.previous_day_low:.5f}\n"
+            f"{'─' * 55}"
         )
 
     def _run_trading(self, df, current_price: float, ny_time) -> None:
