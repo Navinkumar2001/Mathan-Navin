@@ -82,10 +82,10 @@ class SessionManager:
         return utc_time.astimezone(ny_tz)
 
     def is_observation_session(self, utc_time: datetime | None = None) -> bool:
-        """Check if current time is within observation session (07:00-15:30 UTC+3, inclusive)."""
+        """Check if current time is within observation session (07:00 to before 15:30 UTC+3)."""
         now = self.get_ist_time(utc_time)
         current_time = now.time()
-        return self.obs_start <= current_time <= self.obs_end
+        return self.obs_start <= current_time < self.obs_end
 
     def is_trading_session(self, utc_time: datetime | None = None) -> bool:
         """Check if current time is within trading session (15:30-21:00 UTC+3)."""

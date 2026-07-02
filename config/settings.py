@@ -21,6 +21,7 @@ class TradingConfig:
     max_daily_losses: int = 3
     max_open_trades: int = 1
     spread_limit: float = 3.0
+    lot_size: float = 0.01
 
     # MT5 credentials
     mt5_login: int = 0
