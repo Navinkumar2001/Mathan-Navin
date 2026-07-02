@@ -145,6 +145,16 @@ class MT5Connector:
             "trade_contract_size": info.trade_contract_size,
         }
 
+    def _get_filling_mode(self, symbol_info) -> int:
+        """Determine the supported filling mode for a symbol."""
+        filling = symbol_info.filling_mode
+        if filling & mt5.SYMBOL_FILLING_FOK:
+            return mt5.ORDER_FILLING_FOK
+        elif filling & mt5.SYMBOL_FILLING_IOC:
+            return mt5.ORDER_FILLING_IOC
+        else:
+            return mt5.ORDER_FILLING_RETURN
+
     def place_order(
         self,
         order_type: str,
@@ -170,6 +180,9 @@ class MT5Connector:
 
         mt5_order_type = mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL
 
+        # Determine supported filling mode for this symbol
+        filling_mode = self._get_filling_mode(symbol_info)
+
         request: dict[str, Any] = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.config.symbol,
@@ -182,7 +195,7 @@ class MT5Connector:
             "magic": 202200,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": filling_mode,
         }
 
         result = mt5.order_send(request)
