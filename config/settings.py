@@ -27,12 +27,12 @@ class TradingConfig:
     mt5_server: str = ""
     mt5_password: str = ""
 
-    # Timezone and sessions (UTC+3 by default)
-    timezone: str = "Etc/GMT-3"
-    observation_start: str = "00:00"
-    observation_end: str = "07:00"
-    trading_start: str = "07:00"
-    trading_end: str = "15:30"
+    # Timezone and sessions (IST GMT+5:30 by default)
+    timezone: str = "Asia/Kolkata"
+    observation_start: str = "09:30"
+    observation_end: str = "18:00"
+    trading_start: str = "18:00"
+    trading_end: str = "23:30"
 
     # ICT parameters
     min_displacement_pips: float = 10.0
