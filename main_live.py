@@ -261,7 +261,7 @@ class LiveTradingBot:
 
     def _run_observation(self, df, current_price: float) -> None:
         """
-        Run observation phase (NY 00:00-08:30).
+        Run observation phase (07:00-15:30 UTC+3).
         Track session high and low to build the range boundaries.
         Also detect ICT structures for confluence.
         """
@@ -303,12 +303,12 @@ class LiveTradingBot:
     def _print_observation_details(self, current_price: float) -> None:
         """Print high, low, and current price for the observation window."""
         sm = self.session_manager
-        ny_time = sm.get_ny_time()
+        session_time = sm.get_ist_time()  # Returns time in configured tz (UTC+3)
         session_high = sm.session_high
         session_low = sm.session_low if sm.session_low != float("inf") else 0.0
 
         logger.info(
-            f"📊 {ny_time.strftime('%H:%M:%S')} NY | "
+            f"📊 {session_time.strftime('%H:%M:%S')} MT5 | "
             f"High: {session_high:.5f} | "
             f"Low: {session_low:.5f} | "
             f"Current: {current_price:.5f}"
@@ -316,7 +316,7 @@ class LiveTradingBot:
 
     def _run_trading(self, df, current_price: float, ny_time) -> None:
         """
-        Run trading phase (NY 08:30-14:00).
+        Run trading phase (15:30-21:00 UTC+3).
         Primary signal: Range breakout re-entry.
         - Price crosses session high and comes back inside → SELL
         - Price crosses session low and comes back inside → BUY
