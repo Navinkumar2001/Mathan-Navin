@@ -425,20 +425,17 @@ class LiveTradingBot:
     def _backfill_observation_session(self) -> None:
         """
         Backfill session high/low from historical candles for today's observation window.
-        Fetches enough M5 candles, filters by NY time, and computes the true high/low.
+        Fetches M5 candles and filters by MT5 server time (UTC+3) for 07:00-15:30.
+
+        IMPORTANT: MT5 candle 'time' field is already in broker server time (UTC+3).
+        The unix timestamp from copy_rates_from_pos represents server time, not UTC.
         """
         import MetaTrader5 as mt5
         import pandas as pd
 
         sm = self.session_manager
-        now = sm.get_ist_time()  # Returns time in configured timezone (NY)
 
-        # Only backfill if we're currently in or past the observation window today
-        if now.time() < sm.obs_start:
-            logger.info("Before observation start, no backfill needed.")
-            return
-
-        # Fetch last 500 M5 candles (covers ~41 hours, more than enough for today)
+        # Fetch last 500 M5 candles (covers ~41 hours)
         tf = mt5.TIMEFRAME_M5
         rates = mt5.copy_rates_from_pos(self.config.symbol, tf, 0, 500)
 
@@ -447,23 +444,27 @@ class LiveTradingBot:
             return
 
         df = pd.DataFrame(rates)
-        # MT5 returns time as seconds since epoch (UTC)
-        df["timestamp_utc"] = pd.to_datetime(df["time"], unit="s", utc=True)
-        df["timestamp_ny"] = df["timestamp_utc"].dt.tz_convert(self.config.timezone)
 
-        # Filter: today's date in NY AND time between obs_start and obs_end
-        today_ny = now.strftime("%Y-%m-%d")
+        # MT5 'time' is already in server time (UTC+3) as a unix timestamp.
+        # Convert directly to datetime without timezone adjustment.
+        df["server_time"] = pd.to_datetime(df["time"], unit="s")
+
+        # Get today's date in server time
+        # Use the latest candle's date as reference for "today"
+        today_server = df["server_time"].iloc[-1].strftime("%Y-%m-%d")
+
+        # Filter: today's date AND time between obs_start (07:00) and obs_end (15:30)
         mask = (
-            (df["timestamp_ny"].dt.strftime("%Y-%m-%d") == today_ny)
-            & (df["timestamp_ny"].dt.time >= sm.obs_start)
-            & (df["timestamp_ny"].dt.time < sm.obs_end)
+            (df["server_time"].dt.strftime("%Y-%m-%d") == today_server)
+            & (df["server_time"].dt.time >= sm.obs_start)
+            & (df["server_time"].dt.time < sm.obs_end)
         )
         obs_candles = df[mask]
 
         if obs_candles.empty:
             logger.warning(
                 f"No candles found for today's observation window "
-                f"({today_ny} {self.config.observation_start}-{self.config.observation_end} NY)."
+                f"({today_server} {self.config.observation_start}-{self.config.observation_end})."
             )
             return
 
@@ -477,10 +478,11 @@ class LiveTradingBot:
         sm.session_open = obs_candles.iloc[0]["open"]
         sm.session_candle_count = len(obs_candles)
         sm.session_started = True
-        sm.session_date = today_ny
+        sm.session_date = today_server
 
         logger.info(
-            f"Session backfilled | {today_ny} {self.config.observation_start}-{self.config.observation_end} NY | "
+            f"Session backfilled | {today_server} "
+            f"{self.config.observation_start}-{self.config.observation_end} (Server Time) | "
             f"Candles: {len(obs_candles)} | High: {backfill_high:.5f} | Low: {backfill_low:.5f} | "
             f"Range: {backfill_high - backfill_low:.5f}"
         )
