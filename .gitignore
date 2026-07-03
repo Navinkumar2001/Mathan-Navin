@@ -9,3 +9,5 @@ reports/*.csv
 charts/*.html
 .venv/
 venv/
+config/service_account.json
+console_logs/*.log
