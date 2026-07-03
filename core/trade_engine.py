@@ -73,10 +73,22 @@ class TradeEngine:
         if session_range <= 0:
             return None
 
+        # Minimum risk distance: at least 5 pips between entry and SL
+        min_risk_pips = 5.0
+        min_risk = min_risk_pips * self.config.pip_value
+
         if signal == "BUY":
             # Entry at session low re-entry, SL below the low, TP at midpoint or high
             stop_loss = session_low - (self.config.pip_value * 5)  # 5 pip buffer
             risk = current_price - stop_loss
+
+            # Skip if risk is too small (price barely inside the range)
+            if risk < min_risk:
+                logger.debug(
+                    f"BUY setup rejected: risk too small ({risk / self.config.pip_value:.1f} pips)"
+                )
+                return None
+
             take_profit = current_price + (risk * self.config.reward_ratio)
 
             setup = TradeSetup(
@@ -104,6 +116,14 @@ class TradeEngine:
             # Entry at session high re-entry, SL above the high, TP at midpoint or low
             stop_loss = session_high + (self.config.pip_value * 5)  # 5 pip buffer
             risk = stop_loss - current_price
+
+            # Skip if risk is too small (price barely inside the range)
+            if risk < min_risk:
+                logger.debug(
+                    f"SELL setup rejected: risk too small ({risk / self.config.pip_value:.1f} pips)"
+                )
+                return None
+
             take_profit = current_price - (risk * self.config.reward_ratio)
 
             setup = TradeSetup(

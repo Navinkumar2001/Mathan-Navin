@@ -45,6 +45,10 @@ class SessionManager:
         # Range breakout tracking (used during trading session)
         self.broke_high: bool = False  # Price went above session_high
         self.broke_low: bool = False   # Price went below session_low
+        self.broke_high_price: float = 0.0  # Price at which the break was detected
+        self.broke_low_price: float = 0.0   # Price at which the break was detected
+        self.break_buffer_pips: float = 3.0  # Minimum pips beyond level to count as a break
+        self.reentry_buffer_pips: float = 3.0  # Minimum pips back inside to confirm re-entry
 
         # Previous day data
         self.previous_day_high: float = 0.0
@@ -138,7 +142,12 @@ class SessionManager:
 
     def check_range_breakout_reentry(self, current_price: float) -> str | None:
         """
-        Check if price broke a range boundary and re-entered.
+        Check if price broke a range boundary and re-entered with confirmation.
+
+        Requirements for a valid signal:
+        1. Price must break beyond the level by at least break_buffer_pips
+        2. Price must then come back INSIDE the range by at least reentry_buffer_pips
+        3. The break and re-entry cannot happen on the same check (must be separate events)
 
         Returns:
             "SELL" - if price broke above session_high and came back inside
@@ -150,29 +159,53 @@ class SessionManager:
         if self.session_high == 0 or self.session_low == float("inf"):
             return None
 
-        # Track if price broke above the high
-        if current_price > self.session_high:
-            self.broke_high = True
+        pip = self.config.pip_value
+        break_buffer = self.break_buffer_pips * pip
+        reentry_buffer = self.reentry_buffer_pips * pip
 
-        # Track if price broke below the low
-        if current_price < self.session_low:
-            self.broke_low = True
+        # Track if price broke CLEARLY above the high (not just a wick touch)
+        if current_price > self.session_high + break_buffer:
+            if not self.broke_high:
+                self.broke_high = True
+                self.broke_high_price = current_price
+                logger.debug(
+                    f"BREAK HIGH detected | Price: {current_price:.5f} | "
+                    f"Session High: {self.session_high:.5f} | Buffer: {break_buffer:.5f}"
+                )
+            return None  # Don't signal on the same check as the break
+
+        # Track if price broke CLEARLY below the low
+        if current_price < self.session_low - break_buffer:
+            if not self.broke_low:
+                self.broke_low = True
+                self.broke_low_price = current_price
+                logger.debug(
+                    f"BREAK LOW detected | Price: {current_price:.5f} | "
+                    f"Session Low: {self.session_low:.5f} | Buffer: {break_buffer:.5f}"
+                )
+            return None  # Don't signal on the same check as the break
 
         # Check re-entry from above → SELL signal
-        if self.broke_high and current_price <= self.session_high:
+        # Price must come back INSIDE the range (below session_high by reentry_buffer)
+        if self.broke_high and current_price <= self.session_high - reentry_buffer:
             self.broke_high = False  # Reset after signal
+            self.broke_high_price = 0.0
             logger.info(
                 f"RANGE RE-ENTRY FROM HIGH → SELL | Price: {current_price:.5f} | "
-                f"Session High: {self.session_high:.5f}"
+                f"Session High: {self.session_high:.5f} | "
+                f"Re-entry depth: {(self.session_high - current_price) / pip:.1f} pips"
             )
             return "SELL"
 
         # Check re-entry from below → BUY signal
-        if self.broke_low and current_price >= self.session_low:
+        # Price must come back INSIDE the range (above session_low by reentry_buffer)
+        if self.broke_low and current_price >= self.session_low + reentry_buffer:
             self.broke_low = False  # Reset after signal
+            self.broke_low_price = 0.0
             logger.info(
                 f"RANGE RE-ENTRY FROM LOW → BUY | Price: {current_price:.5f} | "
-                f"Session Low: {self.session_low:.5f}"
+                f"Session Low: {self.session_low:.5f} | "
+                f"Re-entry depth: {(current_price - self.session_low) / pip:.1f} pips"
             )
             return "BUY"
 
@@ -194,6 +227,8 @@ class SessionManager:
         self.range_locked = False
         self.broke_high = False
         self.broke_low = False
+        self.broke_high_price = 0.0
+        self.broke_low_price = 0.0
         logger.info(f"Session reset for {new_date} | PDH: {self.previous_day_high:.5f} | PDL: {self.previous_day_low:.5f}")
 
     def set_previous_day_data(self, high: float, low: float, close: float) -> None:
