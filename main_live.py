@@ -131,6 +131,9 @@ class LiveTradingBot:
         logger.info("Bot started. Waiting for trading signals...")
         logger.info(f"Trading session: {self.config.trading_start} - {self.config.trading_end} ({self.config.timezone})")
 
+        # Start Telegram /status command listener
+        self.telegram.start_command_listener(self._get_current_status)
+
         try:
             self._main_loop()
         except KeyboardInterrupt:
@@ -563,9 +566,27 @@ class LiveTradingBot:
         )
         self.sheets_logger.log_market_state(state)
 
+    def _get_current_status(self) -> dict:
+        """Return current bot state for /status command replies."""
+        tick = self.mt5.get_current_tick()
+        current_price = tick["bid"] if tick else 0.0
+
+        return {
+            "symbol": self.config.symbol,
+            "session_high": self.session_manager.session_high,
+            "session_low": self.session_manager.session_low,
+            "current_price": current_price,
+            "is_observation": self.session_manager.is_observation_session(),
+            "is_trading": self.session_manager.is_trading_session(),
+            "has_active_trade": self.trade_engine.has_active_trade,
+            "daily_bias": self.bias_engine.current_bias.value,
+            "account_balance": self.account_balance,
+        }
+
     def _shutdown(self) -> None:
         """Graceful shutdown."""
         self.running = False
+        self.telegram.stop_command_listener()
         logger.info("Shutting down...")
 
         # Close any open position if configured

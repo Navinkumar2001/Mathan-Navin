@@ -6,12 +6,14 @@ Sends alerts to Telegram via TWO bots (different users):
   - Trade closed (with P/L)
   - Hourly session status update
   - End-of-day summary report
+  - On-demand status when user sends /status
 
 Each bot has its own token and chat_id for its respective user.
 """
 
+import threading
 from datetime import datetime, date
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from loguru import logger
@@ -37,6 +39,12 @@ class TelegramNotifier:
         self._hourly_interval = 3600  # 1 hour in seconds
         self._daily_trades: list[dict] = []
         self._current_date: date | None = None
+
+        # For /status command polling
+        self._status_callback: Callable[[], dict] | None = None
+        self._last_update_ids: dict[str, int] = {}  # track last update_id per bot
+        self._polling_active = False
+        self._poll_thread: threading.Thread | None = None
 
     def _send_to_all(self, text: str, parse_mode: str = "HTML") -> None:
         """Send a message to all configured bots."""
@@ -238,3 +246,107 @@ class TelegramNotifier:
         if self._current_date != today:
             self._daily_trades = []
             self._current_date = today
+
+    # --- On-demand /status command ---
+
+    def start_command_listener(self, status_callback: Callable[[], dict]) -> None:
+        """
+        Start background thread that polls for /status commands from users.
+
+        Args:
+            status_callback: Function that returns current bot state as a dict with keys:
+                symbol, session_high, session_low, current_price,
+                is_observation, is_trading, has_active_trade, daily_bias, account_balance
+        """
+        self._status_callback = status_callback
+        self._polling_active = True
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+        logger.info("Telegram command listener started. Users can send /status for updates.")
+
+    def stop_command_listener(self) -> None:
+        """Stop the polling thread."""
+        self._polling_active = False
+
+    def _poll_loop(self) -> None:
+        """Background loop that checks for incoming /status messages every 5 seconds."""
+        import time
+        while self._polling_active:
+            for bot in self.bots:
+                try:
+                    self._check_commands(bot["token"], bot["chat_id"])
+                except Exception as e:
+                    logger.debug(f"Telegram poll error: {e}")
+            time.sleep(5)
+
+    def _check_commands(self, bot_token: str, chat_id: str) -> None:
+        """Check for new messages on a bot and respond to /status."""
+        offset = self._last_update_ids.get(bot_token, 0)
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+        params = {"offset": offset + 1, "timeout": 0, "limit": 10}
+
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            if not data.get("ok"):
+                return
+
+            for update in data.get("result", []):
+                update_id = update["update_id"]
+                self._last_update_ids[bot_token] = update_id
+
+                message = update.get("message", {})
+                text = message.get("text", "").strip().lower()
+                msg_chat_id = str(message.get("chat", {}).get("id", ""))
+
+                if text == "/status" and msg_chat_id == chat_id:
+                    self._send_status_reply(bot_token, chat_id)
+
+        except Exception:
+            pass
+
+    def _send_status_reply(self, bot_token: str, chat_id: str) -> None:
+        """Send current status as reply to /status command."""
+        if self._status_callback is None:
+            self._send_message(bot_token, chat_id, "⚠️ Bot not fully initialized yet.")
+            return
+
+        try:
+            state = self._status_callback()
+        except Exception as e:
+            self._send_message(bot_token, chat_id, f"⚠️ Error getting status: {e}")
+            return
+
+        session_high = state.get("session_high", 0.0)
+        session_low = state.get("session_low", 0.0)
+        if session_low == float("inf"):
+            session_low = 0.0
+        current_price = state.get("current_price", 0.0)
+        session_range = session_high - session_low if session_high > 0 else 0.0
+
+        is_obs = state.get("is_observation", False)
+        is_trade = state.get("is_trading", False)
+        phase = "🔍 Observation" if is_obs else "⚡ Trading" if is_trade else "💤 Off-hours"
+        trade_status = "🟢 Active" if state.get("has_active_trade", False) else "⚪ None"
+
+        msg = (
+            f"📊 <b>CURRENT STATUS</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🕐 Time: {datetime.now().strftime('%H:%M:%S')} | {phase}\n"
+            f"📈 Symbol: <b>{state.get('symbol', 'N/A')}</b>\n"
+            f"💵 Price: <b>{current_price:.5f}</b>\n"
+            f"⬆️ High: {session_high:.5f}\n"
+            f"⬇️ Low: {session_low:.5f}\n"
+            f"📏 Range: {session_range:.5f}\n"
+            f"🧭 Bias: {state.get('daily_bias', 'NEUTRAL')}\n"
+            f"📋 Trade: {trade_status}\n"
+        )
+
+        balance = state.get("account_balance", 0.0)
+        if balance > 0:
+            msg += f"💼 Balance: ${balance:,.2f}\n"
+
+        msg += f"━━━━━━━━━━━━━━━"
+        self._send_message(bot_token, chat_id, msg)
