@@ -457,7 +457,7 @@ class LiveTradingBot:
         mask = (
             (df["server_time"].dt.strftime("%Y-%m-%d") == today_server)
             & (df["server_time"].dt.time >= sm.obs_start)
-            & (df["server_time"].dt.time < sm.obs_end)
+            & (df["server_time"].dt.time <= sm.obs_end)
         )
         obs_candles = df[mask]
 
