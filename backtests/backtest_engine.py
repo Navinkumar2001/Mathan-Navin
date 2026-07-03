@@ -10,7 +10,7 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import TradingConfig
-from core.csv_logger import CSVLogger
+from core.sheets_logger import SheetsLogger
 from core.data_models import (
     Direction,
     ExitReason,
@@ -46,7 +46,7 @@ class BacktestEngine:
         self.fvg_engine = FVGEngine(config)
         self.ob_engine = OrderBlockEngine(config)
         self.bias_engine = BiasEngine()
-        self.csv_logger = CSVLogger(config)
+        self.sheets_logger = SheetsLogger(config)
 
         # Backtest state
         self.initial_balance: float = 10000.0
@@ -280,7 +280,7 @@ class BacktestEngine:
         trade.profit_loss_percent = (pnl_currency / self.initial_balance) * 100
 
         self.all_trades.append(trade)
-        self.csv_logger.log_trade(trade)
+        self.sheets_logger.log_trade(trade)
 
     def _log_state(
         self, candle: Any, bias: Direction, sweep: Any, mss: Any, fvg: Any, ob: Any
@@ -309,7 +309,7 @@ class BacktestEngine:
             entry_signal=self.trade_engine.current_setup is not None,
             current_trade_status="OPEN" if self.trade_engine.has_active_trade else "NONE",
         )
-        self.csv_logger.log_market_state(state)
+        self.sheets_logger.log_market_state(state)
 
     def generate_report(self) -> dict[str, Any]:
         """Generate comprehensive performance report."""

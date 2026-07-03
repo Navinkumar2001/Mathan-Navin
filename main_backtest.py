@@ -78,6 +78,10 @@ def main() -> None:
 
     setup_logging(args.log_level)
 
+    # Capture all console output to console_logs/ directory
+    from console_logs import setup_console_logging
+    setup_console_logging(prefix="backtest")
+
     # Load config
     config_path = Path(args.config)
     if config_path.exists():
