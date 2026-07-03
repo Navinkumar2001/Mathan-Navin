@@ -32,7 +32,7 @@
     "log_level": "INFO",
     "telegram_trade_bot_token": "8744026348:AAHm8kCvklJx7htyhtXKUSUsLsOJSOddgo0",
     "telegram_trade_bot_chat_id": "1100493629",
-    "telegram_update_bot_token": "08890879426:AAE66E_yXkw5aRBk1xZrI8CNHy7fAawcXpg",
+    "telegram_update_bot_token": "8890879426:AAE66E_yXkw5aRBk1xZrI8CNHy7fAawcXpg",
     "telegram_update_bot_chat_id": "1079254687"
 }
 
