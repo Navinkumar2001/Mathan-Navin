@@ -61,6 +61,12 @@ class TradingConfig:
     # Logging
     log_level: str = "INFO"
 
+    # Telegram notifications
+    telegram_trade_bot_token: str = ""
+    telegram_trade_bot_chat_id: str = ""
+    telegram_update_bot_token: str = ""
+    telegram_update_bot_chat_id: str = ""
+
     @classmethod
     def from_json(cls, config_path: str | Path) -> "TradingConfig":
         """Load configuration from JSON file."""

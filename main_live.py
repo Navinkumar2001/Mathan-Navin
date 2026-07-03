@@ -50,6 +50,7 @@ from core.risk_manager import RiskManager
 from core.session_manager import SessionManager
 from core.trade_engine import TradeEngine
 from core.sheets_logger import SheetsLogger
+from core.telegram_notifier import TelegramNotifier
 from core.data_models import Direction, MarketState
 from strategies.bias_engine import BiasEngine
 from strategies.structure_engine import StructureEngine
@@ -73,6 +74,12 @@ class LiveTradingBot:
         self.session_manager = SessionManager(config)
         self.trade_engine = TradeEngine(config, self.risk_manager)
         self.sheets_logger = SheetsLogger(config)
+        self.telegram = TelegramNotifier(
+            trade_bot_token=config.telegram_trade_bot_token,
+            trade_bot_chat_id=config.telegram_trade_bot_chat_id,
+            update_bot_token=config.telegram_update_bot_token,
+            update_bot_chat_id=config.telegram_update_bot_chat_id,
+        )
 
         # Strategy engines
         self.bias_engine = BiasEngine()
@@ -206,6 +213,7 @@ class LiveTradingBot:
                                         if not self.dry_run:
                                             self._place_mt5_order(trade)
                                         self.sheets_logger.log_trade(trade)
+                                        self.telegram.notify_trade_opened(trade)
                     time.sleep(poll_interval)
                     continue
 
@@ -242,8 +250,28 @@ class LiveTradingBot:
                             if not self.dry_run:
                                 self._close_mt5_position()
 
+                    # Send end-of-day report via Telegram
+                    self.telegram.send_daily_report(
+                        symbol=self.config.symbol,
+                        session_high=self.session_manager.session_high,
+                        session_low=self.session_manager.session_low,
+                        account_balance=self.account_balance,
+                    )
+
                 # Log market state to CSV
                 self._log_market_state(latest_candle, ny_time)
+
+                # Send hourly Telegram session update
+                self.telegram.send_hourly_update(
+                    session_high=self.session_manager.session_high,
+                    session_low=self.session_manager.session_low,
+                    current_price=current_price,
+                    is_observation=is_observation,
+                    is_trading=is_trading,
+                    has_active_trade=self.trade_engine.has_active_trade,
+                    daily_bias=self.bias_engine.current_bias.value,
+                    symbol=self.config.symbol,
+                )
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
@@ -357,6 +385,7 @@ class LiveTradingBot:
                     if not self.dry_run:
                         self._place_mt5_order(trade)
                     self.sheets_logger.log_trade(trade)
+                    self.telegram.notify_trade_opened(trade)
 
     def _place_mt5_order(self, trade) -> None:
         """Place actual order on MT5."""
@@ -395,6 +424,7 @@ class LiveTradingBot:
             f"Reason: {trade.exit_reason}"
         )
         self.sheets_logger.log_trade(trade)
+        self.telegram.notify_trade_closed(trade)
 
         # Update account balance
         account = self.mt5.get_account_info()

@@ -10,5 +10,8 @@ loguru>=0.7.2
 gspread>=6.0.0
 google-auth>=2.25.0
 
+# Telegram notifications
+requests>=2.25.0
+
 # MT5 (Windows only - needed for live trading)
 # MetaTrader5>=5.0.45

@@ -29,5 +29,9 @@
     "dashboard_port": 8050,
     "csv_market_state_path": "data/current_market_state.csv",
     "csv_trade_journal_path": "data/trade_journal.csv",
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "telegram_trade_bot_token": "8744026348:AAHm8kCvklJx7htyhtXKUSUsLsOJSOddgo",
+    "telegram_trade_bot_chat_id": "1079254687",
+    "telegram_update_bot_token": "08890879426:AAE66E_yXkw5aRBk1xZrI8CNHy7fAawcXpg",
+    "telegram_update_bot_chat_id": "1100493629"
 }
