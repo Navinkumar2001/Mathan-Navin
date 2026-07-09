@@ -587,6 +587,7 @@ class LiveTradingBot:
         """Graceful shutdown."""
         self.running = False
         self.telegram.stop_command_listener()
+        self.sheets_logger.shutdown()
         logger.info("Shutting down...")
 
         # Close any open position if configured

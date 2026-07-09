@@ -3,6 +3,8 @@
 Replaces CSV logging with Google Sheets integration.
 Uses gspread with service account credentials.
 
+All API calls are asynchronous using asyncio for concurrent execution.
+
 Setup:
     1. Create a Google Cloud project and enable Sheets API
     2. Create a service account and download the JSON key
@@ -10,7 +12,8 @@ Setup:
     4. Share both Google Sheets with the service account email (Editor access)
 """
 
-import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,7 +53,11 @@ SCOPES = [
 
 
 class SheetsLogger:
-    """Handles Google Sheets logging for market state and trade journal."""
+    """Handles Google Sheets logging for market state and trade journal.
+
+    API calls are executed asynchronously using a thread pool to avoid
+    blocking the main trading loop.
+    """
 
     def __init__(self, config: TradingConfig) -> None:
         self.config = config
@@ -59,6 +66,7 @@ class SheetsLogger:
         self._market_state_sheet: gspread.Worksheet | None = None
         self._last_market_state_log: datetime | None = None
         self._market_state_interval = 60  # Log every 60 seconds (1 minute)
+        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="sheets")
         self._connect()
 
     def _connect(self) -> None:
@@ -102,8 +110,47 @@ class SheetsLogger:
         except Exception:
             sheet.update("A1", [columns])
 
+    def _run_async(self, func, *args) -> None:
+        """Run a blocking function asynchronously in the thread pool."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(self._executor, func, *args)
+        except RuntimeError:
+            # No event loop running, submit directly to executor
+            self._executor.submit(func, *args)
+
+    def _append_market_state_row(self, row: list[str]) -> None:
+        """Blocking call to append market state row."""
+        try:
+            self._market_state_sheet.append_row(row, value_input_option="RAW")
+        except Exception as e:
+            logger.error(f"Failed to log market state to Google Sheets: {e}")
+            self._try_reconnect()
+
+    def _append_trade_row(self, row: list[str], trade_id: str) -> None:
+        """Blocking call to append trade row."""
+        try:
+            self._trade_journal_sheet.append_row(row, value_input_option="RAW")
+            logger.info(f"Trade logged to Google Sheets: {trade_id}")
+        except Exception as e:
+            logger.error(f"Failed to log trade to Google Sheets: {e}")
+            self._try_reconnect()
+
+    def _clear_market_state(self) -> None:
+        """Blocking call to clear market state sheet."""
+        try:
+            row_count = self._market_state_sheet.row_count
+            if row_count > 1:
+                self._market_state_sheet.delete_rows(2, row_count)
+                logger.info("Market state sheet cleared for new day.")
+        except Exception as e:
+            logger.error(f"Failed to reset market state sheet: {e}")
+
     def log_market_state(self, state: MarketState) -> None:
-        """Append a market state row to the Google Sheet (throttled to 1 per minute)."""
+        """Append a market state row to the Google Sheet (throttled to 1 per minute).
+
+        Runs asynchronously to avoid blocking the main loop.
+        """
         if self._market_state_sheet is None:
             return
 
@@ -119,39 +166,30 @@ class SheetsLogger:
         data = state.to_dict()
         row = [str(data.get(col, "")) for col in MARKET_STATE_COLUMNS]
 
-        try:
-            self._market_state_sheet.append_row(row, value_input_option="RAW")
-        except Exception as e:
-            logger.error(f"Failed to log market state to Google Sheets: {e}")
-            self._try_reconnect()
+        self._run_async(self._append_market_state_row, row)
 
     def log_trade(self, trade: TradeRecord) -> None:
-        """Append a trade record to the trade journal Google Sheet."""
+        """Append a trade record to the trade journal Google Sheet.
+
+        Runs asynchronously to avoid blocking the main loop.
+        """
         if self._trade_journal_sheet is None:
             return
 
         data = trade.to_dict()
         row = [str(data.get(col, "")) for col in TRADE_JOURNAL_COLUMNS]
 
-        try:
-            self._trade_journal_sheet.append_row(row, value_input_option="RAW")
-            logger.info(f"Trade logged to Google Sheets: {trade.trade_id}")
-        except Exception as e:
-            logger.error(f"Failed to log trade to Google Sheets: {e}")
-            self._try_reconnect()
+        self._run_async(self._append_trade_row, row, trade.trade_id)
 
     def reset_market_state(self) -> None:
-        """Clear market state sheet data (keep headers) for new day."""
+        """Clear market state sheet data (keep headers) for new day.
+
+        Runs asynchronously to avoid blocking the main loop.
+        """
         if self._market_state_sheet is None:
             return
 
-        try:
-            row_count = self._market_state_sheet.row_count
-            if row_count > 1:
-                self._market_state_sheet.delete_rows(2, row_count)
-                logger.info("Market state sheet cleared for new day.")
-        except Exception as e:
-            logger.error(f"Failed to reset market state sheet: {e}")
+        self._run_async(self._clear_market_state)
 
     def _try_reconnect(self) -> None:
         """Attempt to reconnect to Google Sheets on failure."""
@@ -160,3 +198,7 @@ class SheetsLogger:
             self._connect()
         except Exception as e:
             logger.error(f"Reconnection failed: {e}")
+
+    def shutdown(self) -> None:
+        """Shutdown the thread pool executor."""
+        self._executor.shutdown(wait=False)
