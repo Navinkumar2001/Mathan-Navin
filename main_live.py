@@ -205,6 +205,7 @@ class LiveTradingBot:
                                     session_high=self.session_manager.session_high,
                                     session_low=session_low,
                                     is_trading_session=True,
+                                    df=df,
                                 )
                                 if setup and setup.valid:
                                     account = self.mt5.get_account_info()
@@ -374,6 +375,7 @@ class LiveTradingBot:
                 session_high=self.session_manager.session_high,
                 session_low=self.session_manager.session_low if self.session_manager.session_low != float("inf") else 0,
                 is_trading_session=True,
+                df=df,
             )
 
             if setup and setup.valid:

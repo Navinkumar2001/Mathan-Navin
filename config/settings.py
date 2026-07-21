@@ -50,6 +50,10 @@ class TradingConfig:
     breakeven_at_rr: float = 1.0
     session_close_exit: bool = True
 
+    # ATR-based stop loss
+    atr_period: int = 14
+    atr_multiplier: float = 1.5
+
     # Dashboard
     enable_dashboard: bool = True
     dashboard_port: int = 8050

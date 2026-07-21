@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+import pandas as pd
 from loguru import logger
 
 from config.settings import TradingConfig
@@ -42,6 +43,7 @@ class TradeEngine:
         session_high: float,
         session_low: float,
         is_trading_session: bool,
+        df: pd.DataFrame | None = None,
     ) -> TradeSetup | None:
         """
         Evaluate a range breakout re-entry signal.
@@ -49,8 +51,8 @@ class TradeEngine:
         This is the primary entry methodology:
         - During IST 09:00-18:30 we observe and mark session High/Low.
         - During IST 18:30-23:30, if price crosses a boundary and comes back inside:
-          * Crossed HIGH → came back inside → SELL (reversal from premium)
-          * Crossed LOW → came back inside → BUY (reversal from discount)
+          * Crossed HIGH -> came back inside -> SELL (reversal from premium)
+          * Crossed LOW -> came back inside -> BUY (reversal from discount)
 
         Args:
             signal: "BUY" or "SELL" from SessionManager.check_range_breakout_reentry()
@@ -58,6 +60,7 @@ class TradeEngine:
             session_high: Observation session high (range top)
             session_low: Observation session low (range bottom)
             is_trading_session: Whether we are in the trading window
+            df: Price dataframe for ATR-based stop loss calculation
         """
         if not is_trading_session:
             return None
@@ -78,8 +81,14 @@ class TradeEngine:
         min_risk = min_risk_pips * self.config.pip_value
 
         if signal == "BUY":
-            # Entry at session low re-entry, SL below the low, TP at midpoint or high
-            stop_loss = session_low - (self.config.pip_value * 5)  # 5 pip buffer
+            # Use ATR-based stop loss if dataframe is available
+            if df is not None and len(df) >= 15:
+                stop_loss = self.risk_manager.calculate_atr_stop_loss(
+                    current_price, "BUY", df
+                )
+            else:
+                stop_loss = session_low - (self.config.pip_value * 15)  # 15 pip buffer fallback
+
             risk = current_price - stop_loss
 
             # Skip if risk is too small (price barely inside the range)
@@ -113,8 +122,14 @@ class TradeEngine:
             return setup
 
         elif signal == "SELL":
-            # Entry at session high re-entry, SL above the high, TP at midpoint or low
-            stop_loss = session_high + (self.config.pip_value * 5)  # 5 pip buffer
+            # Use ATR-based stop loss if dataframe is available
+            if df is not None and len(df) >= 15:
+                stop_loss = self.risk_manager.calculate_atr_stop_loss(
+                    current_price, "SELL", df
+                )
+            else:
+                stop_loss = session_high + (self.config.pip_value * 15)  # 15 pip buffer fallback
+
             risk = stop_loss - current_price
 
             # Skip if risk is too small (price barely inside the range)
@@ -158,6 +173,7 @@ class TradeEngine:
         ob: OrderBlock | None,
         current_price: float,
         is_trading_session: bool,
+        df: pd.DataFrame | None = None,
     ) -> TradeSetup | None:
         """
         Evaluate if all ICT confirmations are present for a valid trade setup.
@@ -181,11 +197,11 @@ class TradeEngine:
 
         # Validate long setup
         if bias == Direction.BULLISH:
-            return self._evaluate_long_setup(sweep, mss, fvg, ob, current_price)
+            return self._evaluate_long_setup(sweep, mss, fvg, ob, current_price, df)
 
         # Validate short setup
         if bias == Direction.BEARISH:
-            return self._evaluate_short_setup(sweep, mss, fvg, ob, current_price)
+            return self._evaluate_short_setup(sweep, mss, fvg, ob, current_price, df)
 
         return None
 
@@ -196,8 +212,9 @@ class TradeEngine:
         fvg: FairValueGap | None,
         ob: OrderBlock | None,
         current_price: float,
+        df: pd.DataFrame | None = None,
     ) -> TradeSetup | None:
-        """Evaluate bullish trade setup."""
+        """Evaluate bullish trade setup with ATR-based stop loss."""
         # All confirmations required
         if not all([
             sweep and sweep.direction == LiquidityType.SELL_SIDE,
@@ -214,14 +231,27 @@ class TradeEngine:
         if not (in_fvg or in_ob):
             return None
 
-        # Calculate SL: below sweep low or OB low (whichever is safer/lower)
-        sl_candidates = []
-        if sweep:
-            sl_candidates.append(sweep.sweep_price)
-        if ob:
-            sl_candidates.append(ob.low)
-
-        stop_loss = min(sl_candidates) - (self.config.pip_value * 3)  # 3 pip buffer
+        # Calculate SL using ATR strategy
+        if df is not None and len(df) >= 15:
+            stop_loss = self.risk_manager.calculate_atr_stop_loss(
+                current_price, "BUY", df
+            )
+            # Also consider structural levels - use the lower of ATR SL and structure
+            sl_candidates = [stop_loss]
+            if sweep:
+                sl_candidates.append(sweep.sweep_price - (self.config.pip_value * 3))
+            if ob:
+                sl_candidates.append(ob.low - (self.config.pip_value * 3))
+            # Use the lowest (most conservative) stop loss
+            stop_loss = min(sl_candidates)
+        else:
+            # Fallback: structural SL with wider buffer
+            sl_candidates = []
+            if sweep:
+                sl_candidates.append(sweep.sweep_price)
+            if ob:
+                sl_candidates.append(ob.low)
+            stop_loss = min(sl_candidates) - (self.config.pip_value * 10)
 
         # Calculate TP at configured R:R
         risk = current_price - stop_loss
@@ -257,8 +287,9 @@ class TradeEngine:
         fvg: FairValueGap | None,
         ob: OrderBlock | None,
         current_price: float,
+        df: pd.DataFrame | None = None,
     ) -> TradeSetup | None:
-        """Evaluate bearish trade setup."""
+        """Evaluate bearish trade setup with ATR-based stop loss."""
         if not all([
             sweep and sweep.direction == LiquidityType.BUY_SIDE,
             mss and mss.direction == Direction.BEARISH,
@@ -274,14 +305,27 @@ class TradeEngine:
         if not (in_fvg or in_ob):
             return None
 
-        # Calculate SL: above sweep high or OB high (whichever is safer/higher)
-        sl_candidates = []
-        if sweep:
-            sl_candidates.append(sweep.sweep_price)
-        if ob:
-            sl_candidates.append(ob.high)
-
-        stop_loss = max(sl_candidates) + (self.config.pip_value * 3)
+        # Calculate SL using ATR strategy
+        if df is not None and len(df) >= 15:
+            stop_loss = self.risk_manager.calculate_atr_stop_loss(
+                current_price, "SELL", df
+            )
+            # Also consider structural levels - use the higher of ATR SL and structure
+            sl_candidates = [stop_loss]
+            if sweep:
+                sl_candidates.append(sweep.sweep_price + (self.config.pip_value * 3))
+            if ob:
+                sl_candidates.append(ob.high + (self.config.pip_value * 3))
+            # Use the highest (most conservative) stop loss
+            stop_loss = max(sl_candidates)
+        else:
+            # Fallback: structural SL with wider buffer
+            sl_candidates = []
+            if sweep:
+                sl_candidates.append(sweep.sweep_price)
+            if ob:
+                sl_candidates.append(ob.high)
+            stop_loss = max(sl_candidates) + (self.config.pip_value * 10)
 
         # Calculate TP
         risk = stop_loss - current_price

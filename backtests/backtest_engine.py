@@ -237,6 +237,7 @@ class BacktestEngine:
                         session_high=self.session_manager.session_high,
                         session_low=session_low,
                         is_trading_session=True,
+                        df=window,
                     )
 
                     if setup and setup.valid:

@@ -1,4 +1,4 @@
-"""Fair Value Gap (FVG) Detection Engine - ICT 2022."""
+"""Fair Value Gap (FVG) Detection Engine - ICT 2022 with Full Confirmation."""
 
 from datetime import datetime
 
@@ -10,70 +10,147 @@ from core.data_models import Direction, FairValueGap
 
 
 class FVGEngine:
-    """Detects Fair Value Gaps using ICT 2022 three-candle methodology."""
+    """Detects Fair Value Gaps using ICT 2022 three-candle methodology with full confirmation."""
 
     def __init__(self, config: TradingConfig) -> None:
         self.config = config
         self.fvg_list: list[FairValueGap] = []
         self.min_fvg_size = config.min_fvg_size_pips * config.pip_value
 
+    def _is_displacement_candle(self, candle: pd.Series) -> bool:
+        """
+        Check if the middle candle (candle 2) is a strong displacement candle.
+        A displacement candle should have a large body relative to its range,
+        indicating strong momentum that creates the gap.
+        """
+        body = abs(candle["close"] - candle["open"])
+        total_range = candle["high"] - candle["low"]
+
+        if total_range <= 0:
+            return False
+
+        # Body must be at least 60% of total candle range (strong momentum)
+        body_ratio = body / total_range
+        if body_ratio < 0.6:
+            return False
+
+        # Candle range must be meaningful (at least min_displacement_pips)
+        min_displacement = self.config.min_displacement_pips * self.config.pip_value
+        if total_range < min_displacement:
+            return False
+
+        return True
+
+    def _is_fvg_confirmed(
+        self, c1: pd.Series, c2: pd.Series, c3: pd.Series, direction: Direction
+    ) -> bool:
+        """
+        Confirm FVG is 100% valid by checking all three candles.
+
+        For a confirmed FVG:
+        - Bullish: c2 must be bullish, c3 must close above FVG bottom (c1 high)
+        - Bearish: c2 must be bearish, c3 must close below FVG top (c1 low)
+
+        This ensures the gap is respected and not just a wick anomaly.
+        """
+        if direction == Direction.BULLISH:
+            # Middle candle must be bullish (close > open)
+            if c2["close"] <= c2["open"]:
+                return False
+            # Candle 3 must close above the FVG bottom - gap is held
+            if c3["close"] <= c1["high"]:
+                return False
+            # Candle 3 body should be bullish for confirmation
+            if c3["close"] < c3["open"]:
+                return False
+        else:
+            # Middle candle must be bearish (close < open)
+            if c2["close"] >= c2["open"]:
+                return False
+            # Candle 3 must close below the FVG top - gap is held
+            if c3["close"] >= c1["low"]:
+                return False
+            # Candle 3 body should be bearish for confirmation
+            if c3["close"] > c3["open"]:
+                return False
+
+        return True
+
     def detect_fvg(self, df: pd.DataFrame) -> FairValueGap | None:
         """
-        Detect Fair Value Gap on the most recent candles.
+        Detect a 100% confirmed Fair Value Gap on the most recent 3 candles.
 
-        Bullish FVG: Candle 1 High < Candle 3 Low (gap up)
-        Bearish FVG: Candle 1 Low > Candle 3 High (gap down)
+        Confirmation criteria:
+        1. Three-candle gap structure (c1 high < c3 low for bullish)
+        2. Middle candle (c2) must be a strong displacement candle
+        3. Candle 3 must confirm the gap is held (close respects the FVG zone)
+        4. Gap size must meet minimum threshold
         """
         if len(df) < 3:
             return None
 
-        # Use last 3 completed candles
-        c1 = df.iloc[-3]  # First candle
-        c2 = df.iloc[-2]  # Middle candle (displacement)
-        c3 = df.iloc[-1]  # Third candle
+        c1 = df.iloc[-3]
+        c2 = df.iloc[-2]
+        c3 = df.iloc[-1]
+
+        # Check displacement on middle candle first
+        if not self._is_displacement_candle(c2):
+            return None
 
         # Bullish FVG: gap between candle 1 high and candle 3 low
         if c1["high"] < c3["low"]:
             size = c3["low"] - c1["high"]
-            if size >= self.min_fvg_size:
-                fvg = FairValueGap(
-                    direction=Direction.BULLISH,
-                    top=c3["low"],
-                    bottom=c1["high"],
-                    size=size,
-                    timestamp=c3.get("timestamp", datetime.now()),
-                    candle_index=len(df) - 2,
-                )
-                self.fvg_list.append(fvg)
-                logger.info(
-                    f"BULLISH FVG detected | Top: {fvg.top:.5f} | "
-                    f"Bottom: {fvg.bottom:.5f} | Size: {size / self.config.pip_value:.1f} pips"
-                )
-                return fvg
+            if size < self.min_fvg_size:
+                return None
+
+            # Full confirmation check
+            if not self._is_fvg_confirmed(c1, c2, c3, Direction.BULLISH):
+                return None
+
+            fvg = FairValueGap(
+                direction=Direction.BULLISH,
+                top=c3["low"],
+                bottom=c1["high"],
+                size=size,
+                timestamp=c3.get("timestamp", datetime.now()),
+                candle_index=len(df) - 2,
+            )
+            self.fvg_list.append(fvg)
+            logger.info(
+                f"CONFIRMED BULLISH FVG | Top: {fvg.top:.5f} | "
+                f"Bottom: {fvg.bottom:.5f} | Size: {size / self.config.pip_value:.1f} pips"
+            )
+            return fvg
 
         # Bearish FVG: gap between candle 1 low and candle 3 high
         if c1["low"] > c3["high"]:
             size = c1["low"] - c3["high"]
-            if size >= self.min_fvg_size:
-                fvg = FairValueGap(
-                    direction=Direction.BEARISH,
-                    top=c1["low"],
-                    bottom=c3["high"],
-                    size=size,
-                    timestamp=c3.get("timestamp", datetime.now()),
-                    candle_index=len(df) - 2,
-                )
-                self.fvg_list.append(fvg)
-                logger.info(
-                    f"BEARISH FVG detected | Top: {fvg.top:.5f} | "
-                    f"Bottom: {fvg.bottom:.5f} | Size: {size / self.config.pip_value:.1f} pips"
-                )
-                return fvg
+            if size < self.min_fvg_size:
+                return None
+
+            # Full confirmation check
+            if not self._is_fvg_confirmed(c1, c2, c3, Direction.BEARISH):
+                return None
+
+            fvg = FairValueGap(
+                direction=Direction.BEARISH,
+                top=c1["low"],
+                bottom=c3["high"],
+                size=size,
+                timestamp=c3.get("timestamp", datetime.now()),
+                candle_index=len(df) - 2,
+            )
+            self.fvg_list.append(fvg)
+            logger.info(
+                f"CONFIRMED BEARISH FVG | Top: {fvg.top:.5f} | "
+                f"Bottom: {fvg.bottom:.5f} | Size: {size / self.config.pip_value:.1f} pips"
+            )
+            return fvg
 
         return None
 
     def scan_all_fvgs(self, df: pd.DataFrame) -> list[FairValueGap]:
-        """Scan entire dataframe for all FVGs."""
+        """Scan entire dataframe for all confirmed FVGs."""
         fvgs: list[FairValueGap] = []
 
         for i in range(2, len(df)):
@@ -81,31 +158,47 @@ class FVGEngine:
             c2 = df.iloc[i - 1]
             c3 = df.iloc[i]
 
+            # Check displacement on middle candle
+            body = abs(c2["close"] - c2["open"])
+            total_range = c2["high"] - c2["low"]
+            if total_range <= 0:
+                continue
+            body_ratio = body / total_range
+            min_displacement = self.config.min_displacement_pips * self.config.pip_value
+            if body_ratio < 0.6 or total_range < min_displacement:
+                continue
+
             # Bullish FVG
             if c1["high"] < c3["low"]:
                 size = c3["low"] - c1["high"]
-                if size >= self.min_fvg_size:
-                    fvgs.append(FairValueGap(
-                        direction=Direction.BULLISH,
-                        top=c3["low"],
-                        bottom=c1["high"],
-                        size=size,
-                        timestamp=c3.get("timestamp", datetime.now()),
-                        candle_index=i - 1,
-                    ))
+                if size < self.min_fvg_size:
+                    continue
+                if not self._is_fvg_confirmed(c1, c2, c3, Direction.BULLISH):
+                    continue
+                fvgs.append(FairValueGap(
+                    direction=Direction.BULLISH,
+                    top=c3["low"],
+                    bottom=c1["high"],
+                    size=size,
+                    timestamp=c3.get("timestamp", datetime.now()),
+                    candle_index=i - 1,
+                ))
 
             # Bearish FVG
             elif c1["low"] > c3["high"]:
                 size = c1["low"] - c3["high"]
-                if size >= self.min_fvg_size:
-                    fvgs.append(FairValueGap(
-                        direction=Direction.BEARISH,
-                        top=c1["low"],
-                        bottom=c3["high"],
-                        size=size,
-                        timestamp=c3.get("timestamp", datetime.now()),
-                        candle_index=i - 1,
-                    ))
+                if size < self.min_fvg_size:
+                    continue
+                if not self._is_fvg_confirmed(c1, c2, c3, Direction.BEARISH):
+                    continue
+                fvgs.append(FairValueGap(
+                    direction=Direction.BEARISH,
+                    top=c1["low"],
+                    bottom=c3["high"],
+                    size=size,
+                    timestamp=c3.get("timestamp", datetime.now()),
+                    candle_index=i - 1,
+                ))
 
         self.fvg_list = fvgs
         return fvgs
